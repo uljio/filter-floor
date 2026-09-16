@@ -1,0 +1,39 @@
+solana:
+  chain_id: solana
+  rpc_env_key: SOLANA_RPC_URL
+  wss_env_key: SOLANA_WSS_URL
+  factory_addresses:
+    pumpfun: "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+  explorer_url: https://solscan.io
+  notes: >
+    Pump.fun bonding-curve inventory at birth is a caution detail, not
+    an automatic AVOID. Almost all Pump tokens look concentrated at second 0.
+
+base:
+  chain_id: 8453
+  rpc_env_key: BASE_RPC_URL
+  wss_env_key: BASE_WSS_URL
+  factory_addresses:
+    uniswap_v3: "0x33128a8fC17869897dcE68Ed026d694621f6FDfD"
+    # TODO(verify): confirm Clanker factory before treating it as authoritative.
+    clanker: ""
+  explorer_url: https://basescan.org
+  notes: >
+    Clanker factory address must be verified on-chain before enable.
+    Sell simulation is UNKNOWN until fork/eth_call works (later milestone).
+
+robinhood:
+  # TODO(verify): confirm chain_id on-chain before enable. Do not invent it.
+  chain_id: null
+  rpc_env_key: ROBINHOOD_RPC_URL
+  wss_env_key: ROBINHOOD_WSS_URL
+  factory_addresses:
+    # VERIFY ON-CHAIN BEFORE ENABLE. Leave empty until the Pons V2 factory
+    # is confirmed on-chain. Unverified factories stay UNKNOWN, not PASS.
+    pons_v2: ""
+  explorer_url: ""
+  notes: >
+    VERIFY ON-CHAIN BEFORE ENABLE. ROBINHOOD_ENABLED default 0.
+    Do not invent factory addresses. Missing facts stay UNKNOWN.
+    Gate must stay off until factory addresses are filled and tested.
+  enabled_env_key: ROBINHOOD_ENABLED

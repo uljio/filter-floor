@@ -1,0 +1,8 @@
+{
+  "mint_authority_revoked": "UNKNOWN",
+  "freeze_authority_revoked": "UNKNOWN",
+  "lp_locked_or_burned": "UNKNOWN",
+  "honeypot_or_unsellable": "UNKNOWN",
+  "owner_or_upgrade_risk": "UNKNOWN",
+  "token2022_or_hook_risk": "UNKNOWN"
+}

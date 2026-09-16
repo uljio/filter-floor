@@ -1,0 +1,19 @@
+# Live Filter Floor data
+data/
+
+# Secrets and local env
+.env
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+.ruff_cache/
+.mypy_cache/

@@ -1,0 +1,44 @@
+# Hard vetoes and caution rules (spec §4). Tune here, not in Python.
+
+hard_vetoes:
+  # Layer A FAIL on these fields is always AVOID.
+  layer_a_fail:
+    - mint_authority_revoked
+    - freeze_authority_revoked
+    - lp_locked_or_burned
+    - honeypot_or_unsellable
+    - owner_or_upgrade_risk
+    - token2022_or_hook_risk
+  death_rate:
+    min_rate: 0.70
+    min_prior_token_count: 5
+  same_funder_as_known_bad: true
+  bundled_supply_pct: 50
+
+caution:
+  any_layer_a_unknown: true
+  # Fail-closed: incomplete graph facts cannot PASS_FILTER.
+  any_layer_b_unknown: true
+  # Bundle / consolidation FAIL cannot look like a clean pass.
+  any_layer_b_fail: true
+  # Null death_rate is not 0; prior tokens without death labels block PASS_FILTER.
+  unknown_death_rate_with_prior_tokens: true
+  top10_excluding_lp_pct: 30
+  bundled_supply_pct:
+    min: 20
+    max: 50
+  deployer:
+    min_prior_token_count: 10
+    min_death_rate: 0.40
+  funding_cluster_size: 5
+  rpc_partial_failure: true
+
+# Layer B v1 heuristics (spec §6). Tune here, not in Python.
+graph:
+  same_slot_min_buyers: 5
+  shared_funder_min_wallets: 4
+  first_buyers: 20
+  consolidation_tx_window: 50
+  consolidation_min_buyers: 3
+  known_bad_cluster_death_rate: 0.6
+  signature_fetch_limit: 50

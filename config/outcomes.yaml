@@ -1,0 +1,11 @@
+# M4 outcome labeling. Missing price/liquidity → unknown.
+# Never invent survived/rugged without evidence.
+
+liquidity_dead_usd: 10.0
+survived_min_liquidity_usd: 50.0
+drawdown_rugged: 0.90
+drawdown_bled: 0.50
+
+dexscreener:
+  url_template: "https://api.dexscreener.com/latest/dex/tokens/{token}"
+  timeout_s: 8.0

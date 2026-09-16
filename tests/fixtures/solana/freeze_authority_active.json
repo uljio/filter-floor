@@ -1,0 +1,10 @@
+{
+  "note": "SPL Token mint with freeze authority still set \u2192 freeze FAIL, AVOID.",
+  "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+  "data_base64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMqaOwAAAAAGAQEAAAACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg==",
+  "expect": {
+    "mint_authority_revoked": "PASS",
+    "freeze_authority_revoked": "FAIL",
+    "token2022_or_hook_risk": "PASS"
+  }
+}

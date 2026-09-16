@@ -1,0 +1,12 @@
+{
+  "note": "Classic SPL mint, authorities revoked. LP/honeypot stay UNKNOWN so not PASS_FILTER.",
+  "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+  "data_base64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMqaOwAAAAAGAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+  "expect": {
+    "mint_authority_revoked": "PASS",
+    "freeze_authority_revoked": "PASS",
+    "token2022_or_hook_risk": "PASS",
+    "lp_locked_or_burned": "UNKNOWN",
+    "honeypot_or_unsellable": "UNKNOWN"
+  }
+}

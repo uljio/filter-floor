@@ -1,0 +1,8 @@
+{
+  "mint_authority_revoked": "FAIL",
+  "freeze_authority_revoked": "PASS",
+  "lp_locked_or_burned": "PASS",
+  "honeypot_or_unsellable": "PASS",
+  "owner_or_upgrade_risk": "PASS",
+  "token2022_or_hook_risk": "PASS"
+}

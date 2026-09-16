@@ -1,0 +1,24 @@
+# Risk score 0–100 (higher = more dangerous). Weights and caps from spec §4.
+
+weights:
+  bundle_and_bundled_supply_pct: 25
+  holder_concentration_ex_lp: 20
+  funding_cluster_known_bad: 25
+  deployer_death_rate: 20
+  metadata_exotic_program: 10
+
+# Normalization denominators so weighted components stay in 0–weight.
+normalization:
+  death_rate_log_count: 50
+  funding_cluster_size: 10
+
+caps:
+  bundled_supply_pct:
+    threshold: 50
+    min_score: 55
+  death_rate:
+    threshold: 0.7
+    min_score: 70
+
+pass_filter:
+  max_score: 35

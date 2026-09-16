@@ -1,0 +1,7 @@
+{
+  "token": "0x1111111111111111111111111111111111111111",
+  "owner": "0x2222222222222222222222222222222222222222",
+  "pool": "0x3333333333333333333333333333333333333333",
+  "uniswap_v3_factory": "0x33128a8fc17869897dce68ed026d694621f6fdfd",
+  "notes": "Hand-built EVM Layer A fixture. Bytecode is synthesized in tests/test_evm.py via PUSH4 selectors. No mainnet."
+}

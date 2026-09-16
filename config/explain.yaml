@@ -1,0 +1,6 @@
+# Optional LLM explainer (off unless EXPLAIN_ENABLED=1 and XAI_API_KEY is set).
+# The model may only explain ScanResult JSON. It cannot change the verdict.
+
+model: grok-4-1-fast
+max_words: 120
+api_url: https://api.x.ai/v1/chat/completions
