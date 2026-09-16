@@ -23,6 +23,8 @@ class FakeSolanaRpc:
         self.fail = fail
         self.fail_on = set(fail_on or [])
         self.calls: list[tuple[str, str]] = []
+        self.program_accounts: dict[str, list[tuple[str, AccountInfo]]] = {}
+        self.token_largest: dict[str, list[dict]] = {}
 
     def get_account_info(self, address: str) -> AccountInfo | None:
         self.calls.append(("get_account_info", address))
@@ -54,6 +56,24 @@ class FakeSolanaRpc:
         if signature not in self.transactions:
             return None
         return self.transactions[signature]
+
+    def get_program_accounts(
+        self,
+        program_id: str,
+        *,
+        filters: list | None = None,
+    ) -> list[tuple[str, AccountInfo]]:
+        self.calls.append(("get_program_accounts", program_id))
+        if self.fail or "get_program_accounts" in self.fail_on:
+            raise RpcError("mocked getProgramAccounts failure")
+        _ = filters
+        return list(self.program_accounts.get(program_id, []))
+
+    def get_token_largest_accounts(self, mint: str) -> list[dict]:
+        self.calls.append(("get_token_largest_accounts", mint))
+        if self.fail or "get_token_largest_accounts" in self.fail_on:
+            raise RpcError("mocked getTokenLargestAccounts failure")
+        return list(self.token_largest.get(mint, []))
 
 
 class FakeGraphSource:

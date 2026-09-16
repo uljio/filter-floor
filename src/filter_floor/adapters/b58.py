@@ -6,6 +6,20 @@ ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 _INDEX = {ch: i for i, ch in enumerate(ALPHABET)}
 
 
+def b58encode(raw: bytes) -> str:
+    n = int.from_bytes(raw, "big")
+    if n == 0:
+        encoded = ""
+    else:
+        chars: list[str] = []
+        while n:
+            n, rem = divmod(n, 58)
+            chars.append(ALPHABET[rem])
+        encoded = "".join(reversed(chars))
+    pad = len(raw) - len(raw.lstrip(b"\x00"))
+    return ("1" * pad) + encoded
+
+
 def b58decode(value: str) -> bytes:
     if not value:
         return b""

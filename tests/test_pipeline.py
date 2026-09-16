@@ -118,15 +118,11 @@ def test_case_id_format():
 
 
 def test_stub_commands_exit_not_in_milestone():
-    for args in (
-        ["watch", "--chain", "base"],
-        ["watch", "--chain", "robinhood"],
-    ):
-        invoked = runner.invoke(app, list(args))
-        assert invoked.exit_code == 1
-        assert "not in this milestone" in invoked.output
-        assert "PASS_FILTER" not in invoked.output
-        assert "BUY" not in invoked.output
+    invoked = runner.invoke(app, ["watch", "--chain", "robinhood"])
+    assert invoked.exit_code == 1
+    assert "Robinhood watch disabled" in invoked.output
+    assert "PASS_FILTER" not in invoked.output
+    assert "BUY" not in invoked.output
 
 
 def test_label_without_due_exits():
@@ -166,6 +162,40 @@ def test_watch_solana_once_mocked(monkeypatch):
         "filter_floor.listeners.solana_ws.start_watch", fake_start_watch
     )
     invoked = runner.invoke(app, ["watch", "--chain", "solana", "--once"])
+    assert invoked.exit_code == 0, invoked.output
+    assert "CAUTION" in invoked.output
+    assert "BUY" not in invoked.output
+
+
+def test_watch_base_once_mocked(monkeypatch):
+    from datetime import datetime, timezone
+
+    from filter_floor.models import ScanResult, Verdict
+    from tests.helpers import layer_a_unknown, layer_b_unknown, memory_clean
+
+    def fake_start_watch(*, min_score_alert: int, once: bool):
+        assert once is True
+        now = datetime.now(timezone.utc)
+        result = ScanResult(
+            case_id="20260916-base-0x111111",
+            chain=Chain.base,
+            token="0x1111111111111111111111111111111111111111",
+            scanned_at=now,
+            layer_a=layer_a_unknown(),
+            layer_b=layer_b_unknown(),
+            memory=memory_clean(),
+            score_0_100=0,
+            verdict=Verdict.CAUTION,
+        )
+        typer.echo(
+            f"{result.case_id} {result.chain.value} {result.token} "
+            f"{result.score_0_100} {result.verdict.value}"
+        )
+
+    monkeypatch.setattr(
+        "filter_floor.listeners.evm_ws.start_watch", fake_start_watch
+    )
+    invoked = runner.invoke(app, ["watch", "--chain", "base", "--once"])
     assert invoked.exit_code == 0, invoked.output
     assert "CAUTION" in invoked.output
     assert "BUY" not in invoked.output

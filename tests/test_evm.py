@@ -26,12 +26,13 @@ from filter_floor.scanners.evm import (
     encode_get_pool,
     extract_push4_selectors,
     pad_address,
-    simulate_sell_stub,
+    pad_uint,
+    simulate_sell,
 )
 from filter_floor.scanners.pons import PonsScanner
 from filter_floor.scoring import compute_score
 from filter_floor.vetoes import evaluate
-from tests.helpers import memory_clean
+from tests.helpers import layer_b_unknown, memory_clean
 
 FIXTURES = Path(__file__).parent / "fixtures"
 ADDR = json.loads((FIXTURES / "evm_layer_a_addresses.json").read_text(encoding="utf-8"))
@@ -70,6 +71,13 @@ class FakeEvmRpc(EvmRpc):
         storage: dict[str, str] | None = None,
         code_miss: bool = False,
         call_miss: bool = False,
+        state_override_supported: bool = False,
+        injected_balance: int | None = None,
+        transfer_reverts: bool = False,
+        liquidity: int | None = None,
+        nft_logs: list | None = None,
+        logs: list | None = None,
+        block_number: int | None = 32,
     ) -> None:
         self.code = code
         self.owner = owner
@@ -77,13 +85,27 @@ class FakeEvmRpc(EvmRpc):
         self.storage = {key.lower(): value for key, value in (storage or {}).items()}
         self.code_miss = code_miss
         self.call_miss = call_miss
+        self._state_override_supported = state_override_supported
+        self.injected_balance = injected_balance
+        self.transfer_reverts = transfer_reverts
+        self.liquidity = liquidity
+        self.nft_logs = nft_logs
+        self.logs = logs
+        self.block_number = block_number
 
     def get_code(self, address: str) -> str | None:
         if self.code_miss:
             return None
         return self.code
 
-    def eth_call(self, to: str, data: str) -> str | None:
+    def eth_call(
+        self,
+        to: str,
+        data: str,
+        from_addr: str | None = None,
+        value: str | None = None,
+        state_override: dict | None = None,
+    ) -> str | None:
         if self.call_miss:
             return None
         data_l = data.lower()
@@ -96,7 +118,48 @@ class FakeEvmRpc(EvmRpc):
             if not self.pool:
                 return addr_word(ZERO)
             return addr_word(self.pool)
+        if sel == "1a686502":
+            if self.liquidity is None:
+                return None
+            return "0x" + pad_uint(self.liquidity)
+        if sel == "70a08231":
+            if state_override and self.injected_balance is not None:
+                return "0x" + pad_uint(self.injected_balance)
+            return "0x" + pad_uint(0)
+        if sel == "a9059cbb":
+            if not self._state_override_supported:
+                return None
+            if self.transfer_reverts:
+                return None
+            return "0x" + pad_uint(1)
+        _ = (from_addr, value, to)
         return None
+
+    def supports_state_override(self) -> bool:
+        return self._state_override_supported
+
+    def get_block_number(self) -> int | None:
+        return self.block_number
+
+    def get_logs(
+        self,
+        address: str,
+        topics: list[str] | None = None,
+        from_block: str = "earliest",
+        to_block: str = "latest",
+    ) -> list | None:
+        _ = (address, from_block, to_block)
+        topic0 = (topics or [None])[0]
+        from filter_floor.listeners.evm_ws import POOL_CREATED_TOPIC0
+        from filter_floor.scanners.evm import ERC721_TRANSFER_TOPIC0
+
+        if topic0 == ERC721_TRANSFER_TOPIC0:
+            return self.nft_logs
+        if topic0 == POOL_CREATED_TOPIC0:
+            return self.logs
+        if self.logs is not None:
+            return self.logs
+        return []
 
     def get_storage_at(self, address: str, slot: str) -> str | None:
         return self.storage.get(slot.lower())
@@ -251,7 +314,7 @@ def test_clean_bytecode_still_has_honeypot_and_lp_unknown():
     assert layer_a.owner_or_upgrade_risk is CheckStatus.PASS
     assert layer_a.lp_locked_or_burned is CheckStatus.UNKNOWN
     assert layer_a.honeypot_or_unsellable is CheckStatus.UNKNOWN
-    assert layer_a.details["sell_simulation"] == "stub"
+    assert layer_a.details["sell_simulation"] == "fork_unavailable"
     assert layer_a.details["pools"]
     assert layer_a.details["pools"][0]["pool"] == POOL
     assert layer_a.details["clanker_factory_configured"] is False
@@ -262,12 +325,103 @@ def test_clean_bytecode_still_has_honeypot_and_lp_unknown():
     assert decision.verdict is not Verdict.PASS_FILTER
 
 
-def test_sell_simulation_stub_never_returns_pass():
-    status, details = simulate_sell_stub(token=TOKEN, pool=POOL, rpc=FakeEvmRpc())
+def test_sell_simulation_fork_unavailable_is_unknown_not_pass():
+    status, details = simulate_sell(token=TOKEN, pool=POOL, rpc=FakeEvmRpc())
     assert status is CheckStatus.UNKNOWN
     assert status is not CheckStatus.PASS
-    assert details["sell_simulation"] == "stub"
+    assert details["sell_simulation"] == "fork_unavailable"
     assert "TODO(verify)" in details
+
+
+def test_sell_simulation_eth_call_revert_is_fail():
+    rpc = FakeEvmRpc(
+        state_override_supported=True,
+        injected_balance=10**18,
+        transfer_reverts=True,
+        pool=POOL,
+        code=push4_bytecode("a9059cbb"),
+        owner=ZERO,
+    )
+    status, details = simulate_sell(token=TOKEN, pool=POOL, rpc=rpc)
+    assert status is CheckStatus.FAIL
+    assert status is not CheckStatus.PASS
+    assert details["sell_simulation"] == "eth_call"
+
+
+def test_sell_simulation_eth_call_success_is_pass():
+    rpc = FakeEvmRpc(
+        state_override_supported=True,
+        injected_balance=10**18,
+        transfer_reverts=False,
+        pool=POOL,
+    )
+    status, details = simulate_sell(token=TOKEN, pool=POOL, rpc=rpc)
+    assert status is CheckStatus.PASS
+    assert details["sell_simulation"] == "eth_call"
+
+
+def _nft_transfer_log(*, to: str, token_id: int = 1) -> dict:
+    return {
+        "topics": [
+            "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+            "0x" + "0" * 64,
+            "0x" + pad_address(to),
+            "0x" + pad_uint(token_id),
+        ]
+    }
+
+
+def test_lp_burned_nft_is_pass():
+    rpc = FakeEvmRpc(
+        code=push4_bytecode("a9059cbb"),
+        owner=ZERO,
+        pool=POOL,
+        liquidity=1,
+        nft_logs=[_nft_transfer_log(to="0x000000000000000000000000000000000000dead")],
+    )
+    scanner = _base_scanner(
+        rpc,
+        factory_addresses={
+            "uniswap_v3": FACTORY,
+            "uniswap_v3_nft_manager": "0x03a520b32c04bf3beef7beb72e919cf822ed34f1",
+            "clanker": "",
+        },
+    )
+    layer_a = scanner.scan_layer_a(TOKEN)
+    assert layer_a.lp_locked_or_burned is CheckStatus.PASS
+
+
+def test_lp_unlocked_nft_is_fail():
+    rpc = FakeEvmRpc(
+        code=push4_bytecode("a9059cbb"),
+        owner=ZERO,
+        pool=POOL,
+        liquidity=1,
+        nft_logs=[_nft_transfer_log(to=OWNER)],
+    )
+    scanner = _base_scanner(
+        rpc,
+        factory_addresses={
+            "uniswap_v3": FACTORY,
+            "uniswap_v3_nft_manager": "0x03a520b32c04bf3beef7beb72e919cf822ed34f1",
+            "clanker": "",
+        },
+    )
+    layer_a = scanner.scan_layer_a(TOKEN)
+    assert layer_a.lp_locked_or_burned is CheckStatus.FAIL
+    decision = evaluate(layer_a, layer_b_unknown(), memory_clean(), compute_score(layer_a, layer_b_unknown(), memory_clean()))
+    assert decision.verdict is Verdict.AVOID
+
+
+def test_lp_zero_liquidity_is_fail():
+    rpc = FakeEvmRpc(
+        code=push4_bytecode("a9059cbb"),
+        owner=ZERO,
+        pool=POOL,
+        liquidity=0,
+    )
+    layer_a = _base_scanner(rpc).scan_layer_a(TOKEN)
+    assert layer_a.lp_locked_or_burned is CheckStatus.FAIL
 
 
 def test_pool_discovery_encodes_getpool():

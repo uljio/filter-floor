@@ -43,7 +43,7 @@ Each scan writes:
 
 `case_id` is `{YYYYMMDD}-{chain}-{token[:8]}`.
 
-Solana Layer A (M1) reads mint authority, freeze authority, supply, decimals, and Token-2022 extensions from RPC. Base EVM Layer A (M2) reads `owner()`, bytecode selectors (mint/pause/blacklist/setFee), and Uniswap V3 `getPool` when the factory is configured. Sell simulation on Base is a stub: `honeypot_or_unsellable` stays `UNKNOWN` until fork/`anvil`/`eth_call` actually works. Layer B (M3) then runs same-slot bundle, one-hop shared funder, known-bad cluster, and early-consolidation heuristics. Incomplete graph facts stay `UNKNOWN` and cannot `PASS_FILTER`. LP lock on Solana/Base still stays `UNKNOWN` when unread, so a mechanically “clean” mint can still land **`CAUTION`**. Robinhood / Pons stays gated (`ROBINHOOD_ENABLED=0`) with empty factories.
+Solana Layer A reads mint authority, freeze authority, supply, decimals, Token-2022 extensions, and Raydium AMM v4 LP burn/lock when the LP mint account exists (`PASS` if burned, `FAIL` if still in a wallet). Missing pool/LP account stays `UNKNOWN`. Base EVM Layer A reads `owner()`, bytecode selectors, Uniswap V3 `getPool`, position-NFT burn/lock when those logs exist, and sell simulation via `eth_call` with state override. If the RPC cannot override/fork, `honeypot_or_unsellable` stays `UNKNOWN` (never PASS). Layer B then runs same-slot bundle, one-hop shared funder, known-bad cluster, and early-consolidation heuristics. Incomplete graph facts stay `UNKNOWN` and cannot `PASS_FILTER`. Robinhood / Pons stays gated (`ROBINHOOD_ENABLED=0`) with empty factories.
 
 ```powershell
 ff scan --chain solana --token <mint>
@@ -61,9 +61,10 @@ Public RPC URLs in `.env.example` are for bring-up only.
 ```powershell
 ff watch --chain solana --min-score-alert 50
 ff watch --chain solana --once
+ff watch --chain base --once
 ```
 
-Solana watch polls Pump.fun program signatures for `create` (websocket subscribe is attempted only if `SOLANA_WSS_URL` is set, then falls back to polling). It dedupes mints, writes every scan (including `AVOID`), and prints one line per token: `case_id chain token score verdict`. It does not open a browser. `--once` runs a single poll pass (useful for tests or cron). Watch on Base / Robinhood is **not in this milestone**.
+Solana watch polls Pump.fun program signatures for `create` (websocket subscribe is attempted only if `SOLANA_WSS_URL` is set, then falls back to polling). Base watch polls Uniswap V3 `PoolCreated` on the factory in `config/chains.yaml`. Both dedupe tokens, write every scan (including `AVOID`), and print one line per token: `case_id chain token score verdict`. They do not open a browser. `--once` runs a single poll pass. Robinhood watch stays off until the Pons factory is filled and `ROBINHOOD_ENABLED=1`.
 
 **RPC warning:** live watch needs a paid/stable RPC (Helius, QuickNode, or equivalent). Public endpoints will rate-limit and produce UNKNOWN checks. Filter Floor will not invent PASS when the chain cannot be read.
 

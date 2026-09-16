@@ -4,6 +4,8 @@ solana:
   wss_env_key: SOLANA_WSS_URL
   factory_addresses:
     pumpfun: "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+    # Published Raydium AMM v4 program id.
+    raydium_amm_v4: "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"
   explorer_url: https://solscan.io
   notes: >
     Pump.fun bonding-curve inventory at birth is a caution detail, not
@@ -15,12 +17,16 @@ base:
   wss_env_key: BASE_WSS_URL
   factory_addresses:
     uniswap_v3: "0x33128a8fC17869897dcE68Ed026d694621f6FDfD"
+    # Published Uniswap V3 NonfungiblePositionManager and SwapRouter02 on Base.
+    uniswap_v3_nft_manager: "0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1"
+    uniswap_v3_swap_router: "0x2626664c2603336E57B271c5C0b26F421741e481"
     # TODO(verify): confirm Clanker factory before treating it as authoritative.
     clanker: ""
   explorer_url: https://basescan.org
   notes: >
     Clanker factory address must be verified on-chain before enable.
-    Sell simulation is UNKNOWN until fork/eth_call works (later milestone).
+    Sell simulation uses eth_call with state override; if the RPC cannot
+    fork/override, honeypot stays UNKNOWN (never PASS).
 
 robinhood:
   # TODO(verify): confirm chain_id on-chain before enable. Do not invent it.

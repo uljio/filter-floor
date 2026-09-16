@@ -1,1 +1,1 @@
-"""Launch listeners. Solana/Pump.fun polling is M1; EVM PoolCreated helpers are not wired to ff watch."""
+"""Launch listeners. Solana/Pump.fun and Base PoolCreated polling are live."""

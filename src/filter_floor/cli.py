@@ -86,14 +86,20 @@ def watch(
     once: bool = typer.Option(
         False,
         "--once",
-        help="Single Pump.fun poll pass then exit (Solana only).",
+        help="Single poll pass then exit.",
     ),
 ) -> None:
-    """Watch new launches. Solana/Pump.fun polls in M1; other chains stay stub."""
-    if chain is not Chain.solana:
-        _ = min_score_alert
-        typer.echo(f"watch is {STUB_MESSAGE}")
+    """Watch new launches. Solana polls Pump.fun; Base polls Uniswap V3 PoolCreated."""
+    if chain is Chain.robinhood:
+        typer.echo(
+            "Robinhood watch disabled until Pons factory is filled and ROBINHOOD_ENABLED=1"
+        )
         raise typer.Exit(code=1)
+    if chain is Chain.base:
+        from filter_floor.listeners.evm_ws import start_watch as start_base_watch
+
+        start_base_watch(min_score_alert=min_score_alert, once=once)
+        return
     from filter_floor.listeners.solana_ws import start_watch
 
     start_watch(min_score_alert=min_score_alert, once=once)

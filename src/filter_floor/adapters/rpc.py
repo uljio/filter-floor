@@ -130,6 +130,57 @@ class SolanaRpc:
             raise RpcError("getTransaction: malformed result")
         return result
 
+    def get_program_accounts(
+        self,
+        program_id: str,
+        *,
+        filters: list | None = None,
+    ) -> list[tuple[str, AccountInfo]]:
+        """Return (pubkey, account) pairs. Transport failure raises RpcError."""
+        opts: dict = {"encoding": "base64", "commitment": "confirmed"}
+        if filters:
+            opts["filters"] = filters
+        result = self._call("getProgramAccounts", [program_id, opts])
+        if result is None:
+            return []
+        if not isinstance(result, list):
+            raise RpcError("getProgramAccounts: malformed result")
+        out: list[tuple[str, AccountInfo]] = []
+        for item in result:
+            if not isinstance(item, dict):
+                continue
+            pubkey = item.get("pubkey")
+            account = item.get("account")
+            if not isinstance(pubkey, str) or not isinstance(account, dict):
+                continue
+            out.append((pubkey, _parse_account_value(account)))
+        return out
+
+    def get_token_largest_accounts(self, mint: str) -> list[dict]:
+        """Largest token accounts for a mint. Transport failure raises RpcError."""
+        result = self._call(
+            "getTokenLargestAccounts",
+            [mint, {"commitment": "confirmed"}],
+        )
+        if not isinstance(result, dict):
+            raise RpcError("getTokenLargestAccounts: malformed result")
+        value = result.get("value")
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise RpcError("getTokenLargestAccounts: malformed value")
+        rows: list[dict] = []
+        for item in value:
+            if not isinstance(item, dict) or not item.get("address"):
+                continue
+            rows.append(
+                {
+                    "address": str(item["address"]),
+                    "amount": str(item.get("amount") or "0"),
+                }
+            )
+        return rows
+
 
 def _parse_account_value(value: dict) -> AccountInfo:
     owner = value.get("owner")

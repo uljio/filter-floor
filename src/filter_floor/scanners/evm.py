@@ -1,13 +1,15 @@
 """EVM Layer A (Base first): owner(), bytecode selectors, pool discovery.
 
-Sell simulation is a stub: honeypot_or_unsellable is UNKNOWN until a real
-fork / anvil / eth_call path exists. Missing RPC is UNKNOWN, never PASS.
+Sell simulation uses eth_call with state override. If the RPC cannot fork or
+override state, honeypot_or_unsellable stays UNKNOWN (never PASS).
+Missing RPC is UNKNOWN, never PASS.
 Layer B is computed by the pipeline graph (Milestone 3).
 """
 
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -81,6 +83,39 @@ SELECTOR_GROUPS: dict[str, frozenset[str]] = {
 }
 
 ZERO_ADDRESS = "0x" + ("0" * 40)
+DEAD_ADDRESS = "0x000000000000000000000000000000000000dead"
+BURN_ADDRESSES = {ZERO_ADDRESS, DEAD_ADDRESS}
+
+TRANSFER_SELECTOR = "a9059cbb"  # transfer(address,uint256)
+BALANCE_OF_SELECTOR = "70a08231"  # balanceOf(address)
+OWNER_OF_SELECTOR = "6352211e"  # ownerOf(uint256)
+LIQUIDITY_SELECTOR = "1a686502"  # liquidity()
+
+# keccak256("Transfer(address,address,uint256)")
+ERC721_TRANSFER_TOPIC0 = (
+    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+)
+
+SIM_WALLET = "0x0000000000000000000000000000000000000001"
+SIM_AMOUNT = 10**18
+
+
+@dataclass
+class CallOutcome:
+    data: str | None = None
+    reverted: bool = False
+    fork_unavailable: bool = False
+
+
+def _keccak(data: bytes) -> bytes:
+    try:
+        from eth_hash.auto import keccak
+
+        return keccak(data)
+    except ImportError:
+        from web3 import Web3
+
+        return bytes(Web3.keccak(data))
 
 
 class EvmRpc:
@@ -89,8 +124,39 @@ class EvmRpc:
     def get_code(self, address: str) -> str | None:
         raise NotImplementedError
 
-    def eth_call(self, to: str, data: str) -> str | None:
+    def eth_call(
+        self,
+        to: str,
+        data: str,
+        from_addr: str | None = None,
+        value: str | None = None,
+        state_override: dict | None = None,
+    ) -> str | None:
         raise NotImplementedError
+
+    def call_detailed(
+        self,
+        to: str,
+        data: str,
+        *,
+        from_addr: str | None = None,
+        value: str | None = None,
+        state_override: dict | None = None,
+    ) -> CallOutcome:
+        if state_override and not self.supports_state_override():
+            return CallOutcome(fork_unavailable=True)
+        raw = self.eth_call(
+            to, data, from_addr=from_addr, value=value, state_override=state_override
+        )
+        if raw is None:
+            return CallOutcome(reverted=True)
+        return CallOutcome(data=raw)
+
+    def supports_state_override(self) -> bool:
+        return False
+
+    def get_block_number(self) -> int | None:
+        return None
 
     def get_storage_at(self, address: str, slot: str) -> str | None:
         return None
@@ -113,11 +179,75 @@ class HttpEvmRpc(EvmRpc):
     def get_code(self, address: str) -> str | None:
         return self._rpc("eth_getCode", [normalize_address(address), "latest"])
 
-    def eth_call(self, to: str, data: str) -> str | None:
-        return self._rpc(
-            "eth_call",
-            [{"to": normalize_address(to), "data": data}, "latest"],
+    def eth_call(
+        self,
+        to: str,
+        data: str,
+        from_addr: str | None = None,
+        value: str | None = None,
+        state_override: dict | None = None,
+    ) -> str | None:
+        tx: dict[str, Any] = {"to": normalize_address(to), "data": data}
+        if from_addr:
+            tx["from"] = normalize_address(from_addr)
+        if value:
+            tx["value"] = value
+        params: list[Any] = [tx, "latest"]
+        if state_override:
+            params.append(state_override)
+        result, _error = self._rpc_raw("eth_call", params)
+        if not isinstance(result, str):
+            return None
+        return result
+
+    def call_detailed(
+        self,
+        to: str,
+        data: str,
+        *,
+        from_addr: str | None = None,
+        value: str | None = None,
+        state_override: dict | None = None,
+    ) -> CallOutcome:
+        tx: dict[str, Any] = {"to": normalize_address(to), "data": data}
+        if from_addr:
+            tx["from"] = normalize_address(from_addr)
+        if value:
+            tx["value"] = value
+        params: list[Any] = [tx, "latest"]
+        if state_override:
+            params.append(state_override)
+        result, error = self._rpc_raw("eth_call", params)
+        if error:
+            msg = str(error).lower()
+            if state_override and _looks_like_unsupported_override(msg):
+                return CallOutcome(fork_unavailable=True)
+            if "revert" in msg or "execution" in msg:
+                return CallOutcome(reverted=True)
+            if state_override and ("argument" in msg or "too many" in msg):
+                return CallOutcome(fork_unavailable=True)
+            return CallOutcome(reverted=True)
+        if not isinstance(result, str):
+            return CallOutcome(reverted=True)
+        return CallOutcome(data=result)
+
+    def supports_state_override(self) -> bool:
+        probe = SIM_WALLET
+        outcome = self.call_detailed(
+            probe,
+            "0x",
+            state_override={probe: {"balance": "0x1"}},
         )
+        return not outcome.fork_unavailable
+
+    def get_block_number(self) -> int | None:
+        result, error = self._rpc_raw("eth_blockNumber", [])
+        if error or not isinstance(result, str):
+            return None
+        try:
+            return int(result, 16)
+        except ValueError:
+            return None
 
     def get_storage_at(self, address: str, slot: str) -> str | None:
         return self._rpc(
@@ -148,12 +278,16 @@ class HttpEvmRpc(EvmRpc):
         return result
 
     def _rpc(self, method: str, params: list[Any]) -> str | None:
-        result = self._rpc_result(method, params)
+        result, _error = self._rpc_raw(method, params)
         if not isinstance(result, str):
             return None
         return result
 
     def _rpc_result(self, method: str, params: list[Any]) -> Any:
+        result, _error = self._rpc_raw(method, params)
+        return result
+
+    def _rpc_raw(self, method: str, params: list[Any]) -> tuple[Any, object]:
         try:
             response = httpx.post(
                 self.url,
@@ -162,11 +296,14 @@ class HttpEvmRpc(EvmRpc):
             )
             response.raise_for_status()
             body = response.json()
-        except (httpx.HTTPError, ValueError, TypeError):
-            return None
-        if not isinstance(body, dict) or body.get("error"):
-            return None
-        return body.get("result")
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            return None, str(exc)
+        if not isinstance(body, dict):
+            return None, "non-object json-rpc body"
+        error = body.get("error")
+        if error:
+            return None, error
+        return body.get("result"), None
 
 
 def normalize_address(value: str) -> str:
@@ -201,6 +338,51 @@ def decode_address(word: str | None) -> str | None:
     return "0x" + hexpart[-40:]
 
 
+def decode_uint(word: str | None) -> int | None:
+    if word is None:
+        return None
+    hexpart = word.strip().lower().removeprefix("0x")
+    if not hexpart:
+        return 0
+    try:
+        return int(hexpart, 16)
+    except ValueError:
+        return None
+
+
+def encode_balance_of(holder: str) -> str:
+    return "0x" + BALANCE_OF_SELECTOR + pad_address(holder)
+
+
+def encode_transfer(to: str, amount: int) -> str:
+    return "0x" + TRANSFER_SELECTOR + pad_address(to) + pad_uint(amount)
+
+
+def encode_owner_of(token_id: int) -> str:
+    return "0x" + OWNER_OF_SELECTOR + pad_uint(token_id)
+
+
+def encode_liquidity() -> str:
+    return "0x" + LIQUIDITY_SELECTOR
+
+
+def erc20_balance_slot(holder: str, slot: int) -> str:
+    packed = bytes.fromhex(pad_address(holder) + pad_uint(slot))
+    return "0x" + _keccak(packed).hex()
+
+
+def _looks_like_unsupported_override(msg: str) -> bool:
+    needles = (
+        "too many arguments",
+        "optional arguments",
+        "state override",
+        "unexpected argument",
+        "3 args",
+        "expected 2",
+    )
+    return any(n in msg for n in needles)
+
+
 def extract_push4_selectors(bytecode_hex: str) -> set[str]:
     hexpart = bytecode_hex.strip().lower().removeprefix("0x")
     if len(hexpart) % 2:
@@ -233,24 +415,224 @@ def encode_get_pool(token_a: str, token_b: str, fee: int) -> str:
     return "0x" + GET_POOL_SELECTOR + pad_address(token_a) + pad_address(token_b) + pad_uint(fee)
 
 
+def simulate_sell(
+    *,
+    token: str,
+    pool: str | None,
+    rpc: EvmRpc | None,
+) -> tuple[CheckStatus, dict[str, Any]]:
+    """Buy/sell proxy: eth_call transfer-to-pool with injected ERC20 balance.
+
+    PASS/FAIL only when a state-override eth_call actually ran.
+    No pool, no override/fork, or unmapped balance slot = UNKNOWN, never PASS.
+    """
+    if rpc is None:
+        return CheckStatus.UNKNOWN, {
+            "sell_simulation": "no_rpc",
+            "sell_simulation_status": "UNKNOWN",
+            "TODO(verify)": "no RPC; sell not simulated, not PASS",
+        }
+    if not pool:
+        return CheckStatus.UNKNOWN, {
+            "sell_simulation": "no_pool",
+            "sell_simulation_status": "UNKNOWN",
+            "TODO(verify)": "no pool; sell not simulated, not PASS",
+        }
+    if not rpc.supports_state_override():
+        return CheckStatus.UNKNOWN, {
+            "sell_simulation": "fork_unavailable",
+            "sell_simulation_status": "UNKNOWN",
+            "TODO(verify)": (
+                "RPC has no eth_call state override / fork; "
+                "honeypot not proven, not PASS"
+            ),
+        }
+
+    token_n = normalize_address(token)
+    pool_n = normalize_address(pool)
+    slot_found: int | None = None
+    for slot in range(6):
+        override = {
+            token_n: {
+                "stateDiff": {
+                    erc20_balance_slot(SIM_WALLET, slot): "0x" + pad_uint(SIM_AMOUNT)
+                }
+            }
+        }
+        outcome = rpc.call_detailed(
+            token_n, encode_balance_of(SIM_WALLET), state_override=override
+        )
+        if outcome.fork_unavailable:
+            return CheckStatus.UNKNOWN, {
+                "sell_simulation": "fork_unavailable",
+                "sell_simulation_status": "UNKNOWN",
+                "TODO(verify)": "state override rejected; not PASS",
+            }
+        if decode_uint(outcome.data) == SIM_AMOUNT:
+            slot_found = slot
+            break
+    if slot_found is None:
+        return CheckStatus.UNKNOWN, {
+            "sell_simulation": "cannot_map_balance_slot",
+            "sell_simulation_status": "UNKNOWN",
+            "TODO(verify)": (
+                "could not inject ERC20 balance via state override; "
+                "fork unavailable for this token; not PASS"
+            ),
+        }
+
+    override = {
+        token_n: {
+            "stateDiff": {
+                erc20_balance_slot(SIM_WALLET, slot_found): "0x" + pad_uint(SIM_AMOUNT)
+            }
+        }
+    }
+    outcome = rpc.call_detailed(
+        token_n,
+        encode_transfer(pool_n, SIM_AMOUNT),
+        from_addr=SIM_WALLET,
+        state_override=override,
+    )
+    if outcome.fork_unavailable:
+        return CheckStatus.UNKNOWN, {
+            "sell_simulation": "fork_unavailable",
+            "sell_simulation_status": "UNKNOWN",
+            "TODO(verify)": "state override rejected on sell call; not PASS",
+        }
+    if outcome.reverted:
+        return CheckStatus.FAIL, {
+            "sell_simulation": "eth_call",
+            "sell_simulation_status": "FAIL",
+            "sell_simulation_slot": slot_found,
+            "reason": "transfer to pool reverted (unsellable)",
+        }
+    returned = decode_uint(outcome.data)
+    if returned == 0:
+        return CheckStatus.FAIL, {
+            "sell_simulation": "eth_call",
+            "sell_simulation_status": "FAIL",
+            "reason": "transfer to pool returned false",
+        }
+    return CheckStatus.PASS, {
+        "sell_simulation": "eth_call",
+        "sell_simulation_status": "PASS",
+        "sell_simulation_slot": slot_found,
+    }
+
+
 def simulate_sell_stub(
     *,
     token: str,
     pool: str | None,
     rpc: EvmRpc | None,
 ) -> tuple[CheckStatus, dict[str, Any]]:
-    """Sell simulation is not implemented in M2.
+    """Back-compat alias. Real path is simulate_sell (eth_call / UNKNOWN)."""
+    return simulate_sell(token=token, pool=pool, rpc=rpc)
 
-    Must not return PASS. Missing fork/anvil/eth_call = UNKNOWN → CAUTION.
-    """
-    _ = (token, pool, rpc)
-    return CheckStatus.UNKNOWN, {
-        "sell_simulation": "stub",
-        "sell_simulation_status": "UNKNOWN",
-        "TODO(verify)": (
-            "sell simulation returns UNKNOWN until fork/anvil/eth_call actually works"
-        ),
-    }
+
+def classify_lp_lock(
+    *,
+    rpc: EvmRpc | None,
+    pools: list[dict[str, Any]],
+    nft_manager: str,
+) -> tuple[CheckStatus, dict[str, Any]]:
+    """PASS/FAIL when pool + position owner (or zero liquidity) is actually read."""
+    details: dict[str, Any] = {}
+    if rpc is None:
+        details["TODO(verify):lp"] = "no RPC; LP lock unread, not PASS"
+        return CheckStatus.UNKNOWN, details
+    if not pools:
+        details["TODO(verify):lp"] = "no pool account; LP lock unread, not PASS"
+        return CheckStatus.UNKNOWN, details
+
+    manager = (nft_manager or "").strip()
+    statuses: list[CheckStatus] = []
+    pool_notes: list[dict[str, Any]] = []
+    for row in pools:
+        pool = row.get("pool")
+        note: dict[str, Any] = {"pool": pool}
+        if not pool:
+            statuses.append(CheckStatus.UNKNOWN)
+            pool_notes.append(note)
+            continue
+        raw_liq = rpc.eth_call(pool, encode_liquidity())
+        liquidity = decode_uint(raw_liq)
+        note["liquidity"] = liquidity
+        if raw_liq is None:
+            note["TODO(verify)"] = "pool.liquidity() unread"
+            # Still try NFT owners if we have a manager.
+        if liquidity == 0:
+            note["lp_lock"] = "pool liquidity is 0 (pulled)"
+            statuses.append(CheckStatus.FAIL)
+            pool_notes.append(note)
+            continue
+        if not manager:
+            note["TODO(verify)"] = (
+                "pool exists but NFT position manager not configured; not PASS"
+            )
+            statuses.append(CheckStatus.UNKNOWN)
+            pool_notes.append(note)
+            continue
+        owners = _nft_owners_for_pool(rpc, manager, pool)
+        note["nft_owners"] = owners
+        if owners is None:
+            note["TODO(verify)"] = "position NFT logs/ownerOf unread; not PASS"
+            statuses.append(CheckStatus.UNKNOWN)
+            pool_notes.append(note)
+            continue
+        if not owners:
+            note["TODO(verify)"] = "pool has liquidity but no position NFTs found"
+            statuses.append(CheckStatus.UNKNOWN)
+            pool_notes.append(note)
+            continue
+        unlocked = [o for o in owners if normalize_address(o) not in BURN_ADDRESSES]
+        if unlocked:
+            note["lp_lock"] = "position NFT not burned (unlocked/pullable)"
+            note["unlocked_owners"] = unlocked
+            statuses.append(CheckStatus.FAIL)
+        else:
+            note["lp_lock"] = "position NFTs burned"
+            statuses.append(CheckStatus.PASS)
+        pool_notes.append(note)
+
+    details["lp_pools"] = pool_notes
+    if CheckStatus.FAIL in statuses:
+        return CheckStatus.FAIL, details
+    if CheckStatus.UNKNOWN in statuses:
+        details.setdefault("TODO(verify):lp", "LP lock not fully read; not PASS")
+        return CheckStatus.UNKNOWN, details
+    if statuses and all(s is CheckStatus.PASS for s in statuses):
+        return CheckStatus.PASS, details
+    details["TODO(verify):lp"] = "LP lock not classified; not PASS"
+    return CheckStatus.UNKNOWN, details
+
+
+def _nft_owners_for_pool(rpc: EvmRpc, manager: str, pool: str) -> list[str] | None:
+    """Current NFT owner is the last Transfer `to`. Burned tokens revert ownerOf."""
+    logs = rpc.get_logs(
+        manager,
+        [ERC721_TRANSFER_TOPIC0],
+        from_block="earliest",
+        to_block="latest",
+    )
+    if logs is None:
+        return None
+    latest: dict[int, str] = {}
+    for log in logs:
+        topics = log.get("topics") or []
+        if len(topics) < 4:
+            continue
+        to_addr = decode_address(str(topics[2]))
+        if to_addr is None:
+            continue
+        try:
+            token_id = int(str(topics[3]).removeprefix("0x"), 16)
+        except ValueError:
+            continue
+        latest[token_id] = to_addr
+    _ = pool
+    return list(latest.values())
 
 
 def _matched_selectors(found: set[str], group: str) -> list[str]:
@@ -391,13 +773,14 @@ class EvmScanner(Scanner):
                 "empty factory addresses are not treated as PASS; "
                 "VERIFY ON-CHAIN BEFORE ENABLE"
             )
-        # Pair found does not prove LP is locked/burned.
-        details["lp_locked_or_burned"] = (
-            "UNKNOWN: pool discovery does not prove LP NFT/token is burned "
-            "or in a known locker; unknown locker is not PASS"
+        # Pair found does not prove LP is locked/burned without reading the NFT/LP account.
+        nft_manager = (self.factory_addresses.get("uniswap_v3_nft_manager") or "").strip()
+        lp_status, lp_details = classify_lp_lock(
+            rpc=self.rpc, pools=pools, nft_manager=nft_manager
         )
+        details.update(lp_details)
 
-        honeypot_status, honeypot_details = simulate_sell_stub(
+        honeypot_status, honeypot_details = simulate_sell(
             token=token_norm,
             pool=pools[0]["pool"] if pools else None,
             rpc=self.rpc,
@@ -426,7 +809,7 @@ class EvmScanner(Scanner):
         return LayerA(
             mint_authority_revoked=mint_status,
             freeze_authority_revoked=freeze_status,
-            lp_locked_or_burned=CheckStatus.UNKNOWN,
+            lp_locked_or_burned=lp_status,
             honeypot_or_unsellable=honeypot_status,
             owner_or_upgrade_risk=owner_status,
             token2022_or_hook_risk=fee_status,

@@ -10,10 +10,11 @@ from filter_floor.adapters.spl_mint import ParsedMint, parse_mint_account
 from filter_floor.models import CheckStatus, LayerA, LayerB
 from filter_floor.scanners.base import Scanner, unknown_layer_a, unknown_layer_b
 from filter_floor.scanners.pumpfun import read_bonding_curve
+from filter_floor.scanners.solana_lp import read_solana_lp_lock
 
 LAYER_A_TODO = (
-    "M1: lp_locked_or_burned and honeypot_or_unsellable not fetched "
-    "(no Raydium lock / sell sim). UNKNOWN, never PASS."
+    "honeypot_or_unsellable not simulated on Solana in this slice. "
+    "UNKNOWN, never PASS."
 )
 
 METADATA_PROGRAM_ID = "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"
@@ -98,6 +99,13 @@ def scan_solana_layer_a(
             sources.append("rugcheck")
         details["sources"] = sources
 
+    lp_status, lp_payload = read_solana_lp_lock(client, token)
+    details["lp"] = lp_payload
+    if lp_payload.get("rpc_partial_failure"):
+        details["rpc_partial_failure"] = True
+    if lp_payload.get("TODO(verify):lp"):
+        details["TODO(verify):lp"] = lp_payload["TODO(verify):lp"]
+
     if parsed.program_kind == "unknown" or parsed.mint_authority_status is CheckStatus.UNKNOWN:
         # Not a mint we can classify: keep unread mechanical checks UNKNOWN.
         if parsed.supply is None:
@@ -106,7 +114,7 @@ def scan_solana_layer_a(
     return LayerA(
         mint_authority_revoked=parsed.mint_authority_status,
         freeze_authority_revoked=parsed.freeze_authority_status,
-        lp_locked_or_burned=CheckStatus.UNKNOWN,
+        lp_locked_or_burned=lp_status,
         honeypot_or_unsellable=CheckStatus.UNKNOWN,
         owner_or_upgrade_risk=parsed.owner_or_upgrade_status,
         token2022_or_hook_risk=parsed.token2022_status,
