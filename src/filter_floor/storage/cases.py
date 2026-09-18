@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
 
@@ -38,6 +38,44 @@ def read_scan(case_id: str, data_dir: Path) -> ScanResult:
     if not path.is_file():
         raise FileNotFoundError(f"scan not found: {path}")
     return ScanResult.model_validate_json(path.read_text(encoding="utf-8"))
+
+
+def list_case_summaries(
+    data_dir: Path,
+    *,
+    days: int = 1,
+    now: datetime | None = None,
+) -> list[dict]:
+    """Recent scans as {case_id, chain, token, score, verdict, scanned_at}."""
+    if days < 1:
+        raise ValueError("days must be >= 1")
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    else:
+        moment = moment.astimezone(timezone.utc)
+    start = moment - timedelta(days=days)
+    rows: list[dict] = []
+    for result in iter_scans(data_dir):
+        scanned_at = result.scanned_at
+        if scanned_at.tzinfo is None:
+            scanned_at = scanned_at.replace(tzinfo=timezone.utc)
+        else:
+            scanned_at = scanned_at.astimezone(timezone.utc)
+        if scanned_at < start or scanned_at > moment:
+            continue
+        rows.append(
+            {
+                "case_id": result.case_id,
+                "chain": result.chain.value,
+                "token": result.token,
+                "score": result.score_0_100,
+                "verdict": result.verdict.value,
+                "scanned_at": scanned_at.isoformat(),
+            }
+        )
+    rows.sort(key=lambda row: row["scanned_at"], reverse=True)
+    return rows
 
 
 def read_case_md(case_id: str, data_dir: Path) -> str:

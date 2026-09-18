@@ -126,6 +126,56 @@ def test_get_funnel(tmp_path, monkeypatch):
     assert not funnel_path(tmp_path).exists()
 
 
+def test_get_index_is_local_html():
+    resp = client.get("/")
+    assert resp.status_code == 200, resp.text
+    assert "text/html" in resp.headers.get("content-type", "")
+    body = resp.text
+    assert "Filter Floor" in body
+    assert "http://127.0.0.1:3001" in body
+    assert "BUY" not in body
+    assert "cdn." not in body.lower()
+    assert "jsdelivr" not in body.lower()
+    assert "unpkg" not in body.lower()
+    assert "0.0.0.0" not in body
+
+
+def test_get_cases_lists_recent_summaries(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    now = datetime.now(timezone.utc)
+    recent = _result(
+        token="ApiListNew", scanned_at=now - timedelta(hours=2), verdict=Verdict.CAUTION
+    )
+    old = _result(
+        token="ApiListOld",
+        scanned_at=now - timedelta(days=10),
+        verdict=Verdict.AVOID,
+    )
+    write_case(recent, tmp_path)
+    write_case(old, tmp_path)
+
+    resp = client.get("/cases", params={"days": 1})
+    assert resp.status_code == 200, resp.text
+    rows = resp.json()
+    assert isinstance(rows, list)
+    ids = {row["case_id"] for row in rows}
+    assert recent.case_id in ids
+    assert old.case_id not in ids
+    row = next(item for item in rows if item["case_id"] == recent.case_id)
+    assert set(row) == {
+        "case_id",
+        "chain",
+        "token",
+        "score",
+        "verdict",
+        "scanned_at",
+    }
+    assert row["token"] == recent.token
+    assert row["score"] == recent.score_0_100
+    assert row["verdict"] == "CAUTION"
+    assert "BUY" not in resp.text
+
+
 def test_api_scan_empty_token_is_400(tmp_path, monkeypatch):
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     resp = client.post("/scan", json={"chain": "solana", "token": "   "})

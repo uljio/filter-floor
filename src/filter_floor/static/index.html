@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Filter Floor — local cases</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 0; background: #111; color: #e8e8e8; }
+    header { padding: 12px 16px; border-bottom: 1px solid #333; }
+    h1 { font-size: 1.1rem; margin: 0 0 4px; }
+    .sub { color: #9a9a9a; font-size: 0.85rem; }
+    #funnel { display: flex; flex-wrap: wrap; gap: 12px; padding: 12px 16px; }
+    #funnel span { background: #1c1c1c; border: 1px solid #333; padding: 6px 10px; border-radius: 4px; font-size: 0.85rem; }
+    .toolbar { padding: 0 16px 8px; }
+    select { background: #1c1c1c; color: #e8e8e8; border: 1px solid #444; padding: 4px 8px; }
+    main { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 12px; padding: 0 16px 16px; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #2a2a2a; vertical-align: top; }
+    th { color: #9a9a9a; font-weight: 600; }
+    tbody tr { cursor: pointer; }
+    tbody tr:hover, tbody tr.active { background: #1f1f1f; }
+    .AVOID { color: #f07178; }
+    .CAUTION { color: #e6c07b; }
+    .PASS_FILTER { color: #98c379; }
+    #detail { background: #1a1a1a; border: 1px solid #333; padding: 12px; min-height: 240px; overflow: auto; }
+    pre { white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 0.8rem; }
+    .token { font-family: ui-monospace, monospace; font-size: 0.75rem; }
+    @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Filter Floor</h1>
+    <div class="sub">Local read-only cases. Verdicts: AVOID, CAUTION, PASS_FILTER. Binds 127.0.0.1 only.</div>
+  </header>
+  <div id="funnel">Loading funnel…</div>
+  <div class="toolbar">
+    <label>Verdict
+      <select id="verdict-filter">
+        <option value="">all</option>
+        <option value="AVOID">AVOID</option>
+        <option value="CAUTION">CAUTION</option>
+        <option value="PASS_FILTER">PASS_FILTER</option>
+      </select>
+    </label>
+  </div>
+  <main>
+    <div>
+      <table>
+        <thead>
+          <tr>
+            <th>scanned_at</th>
+            <th>case_id</th>
+            <th>chain</th>
+            <th>token</th>
+            <th>score</th>
+            <th>verdict</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <div id="detail"><pre>Select a case.</pre></div>
+  </main>
+  <script>
+    const API = "http://127.0.0.1:3001";
+    let cases = [];
+
+    function esc(value) {
+      return String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    function bullets(items) {
+      if (!items || !items.length) return "- (none)";
+      return items.map(function (item) { return "- " + item; }).join("\n");
+    }
+
+    function renderFunnel(data) {
+      const el = document.getElementById("funnel");
+      el.innerHTML =
+        "<span>last " + esc(data.days) + " day</span>" +
+        "<span>scanned=" + esc(data.scanned) + "</span>" +
+        "<span>vetoed=" + esc(data.vetoed) + "</span>" +
+        "<span>caution=" + esc(data.caution) + "</span>" +
+        "<span>pass=" + esc(data.pass) + "</span>" +
+        "<span>later_rugged=" + esc(data.later_rugged) + "</span>";
+    }
+
+    function renderTable() {
+      const want = document.getElementById("verdict-filter").value;
+      const body = document.getElementById("rows");
+      const rows = cases.filter(function (row) { return !want || row.verdict === want; });
+      body.innerHTML = rows.map(function (row) {
+        return "<tr data-id=\"" + esc(row.case_id) + "\">" +
+          "<td>" + esc(row.scanned_at) + "</td>" +
+          "<td>" + esc(row.case_id) + "</td>" +
+          "<td>" + esc(row.chain) + "</td>" +
+          "<td class=\"token\">" + esc(row.token) + "</td>" +
+          "<td>" + esc(row.score) + "</td>" +
+          "<td class=\"" + esc(row.verdict) + "\">" + esc(row.verdict) + "</td>" +
+          "</tr>";
+      }).join("") || "<tr><td colspan=\"6\">No cases in the last day.</td></tr>";
+    }
+
+    function statusOf(obj, key) {
+      return obj && obj[key] != null ? obj[key] : "UNKNOWN";
+    }
+
+    function renderCase(detail) {
+      const a = detail.layer_a || {};
+      const b = detail.layer_b || {};
+      const md =
+        "# Case " + detail.case_id + "\n\n" +
+        "- chain: `" + detail.chain + "`\n" +
+        "- token: `" + detail.token + "`\n" +
+        "- scanned_at: " + detail.scanned_at + "\n" +
+        "- verdict: **" + detail.verdict + "**\n" +
+        "- score_0_100: " + detail.score_0_100 + "\n\n" +
+        "## Veto reasons\n" + bullets(detail.veto_reasons) + "\n\n" +
+        "## Caution reasons\n" + bullets(detail.caution_reasons) + "\n\n" +
+        "## Layer A\n" +
+        "- mint_authority_revoked: " + statusOf(a, "mint_authority_revoked") + "\n" +
+        "- freeze_authority_revoked: " + statusOf(a, "freeze_authority_revoked") + "\n" +
+        "- lp_locked_or_burned: " + statusOf(a, "lp_locked_or_burned") + "\n" +
+        "- honeypot_or_unsellable: " + statusOf(a, "honeypot_or_unsellable") + "\n" +
+        "- owner_or_upgrade_risk: " + statusOf(a, "owner_or_upgrade_risk") + "\n" +
+        "- token2022_or_hook_risk: " + statusOf(a, "token2022_or_hook_risk") + "\n\n" +
+        "## Layer B\n" +
+        "- bundle_detected: " + statusOf(b, "bundle_detected") + "\n" +
+        "- bundled_supply_pct: " + (b.bundled_supply_pct == null ? "null" : b.bundled_supply_pct) + "\n" +
+        "- top10_excluding_lp_pct: " + (b.top10_excluding_lp_pct == null ? "null" : b.top10_excluding_lp_pct) + "\n" +
+        "- funding_cluster_size: " + (b.funding_cluster_size == null ? "null" : b.funding_cluster_size) + "\n" +
+        "- same_funder_as_known_bad: " + statusOf(b, "same_funder_as_known_bad") + "\n" +
+        "- early_consolidation: " + statusOf(b, "early_consolidation") + "\n";
+      document.getElementById("detail").innerHTML = "<pre>" + esc(md) + "</pre>";
+    }
+
+    async function load() {
+      const funnelResp = await fetch(API + "/funnel?days=1");
+      renderFunnel(await funnelResp.json());
+      const casesResp = await fetch(API + "/cases?days=1");
+      cases = await casesResp.json();
+      renderTable();
+    }
+
+    document.getElementById("verdict-filter").addEventListener("change", renderTable);
+    document.getElementById("rows").addEventListener("click", async function (event) {
+      const tr = event.target.closest("tr");
+      if (!tr || !tr.dataset.id) return;
+      document.querySelectorAll("#rows tr").forEach(function (row) { row.classList.remove("active"); });
+      tr.classList.add("active");
+      const resp = await fetch(API + "/cases/" + encodeURIComponent(tr.dataset.id));
+      if (!resp.ok) {
+        document.getElementById("detail").innerHTML = "<pre>case not found</pre>";
+        return;
+      }
+      renderCase(await resp.json());
+    });
+
+    load().catch(function (err) {
+      document.getElementById("funnel").textContent = "Could not load local API.";
+      document.getElementById("detail").innerHTML = "<pre>" + esc(err && err.message ? err.message : err) + "</pre>";
+    });
+  </script>
+</body>
+</html>

@@ -144,11 +144,13 @@ ff api
 
 ```
 POST http://127.0.0.1:3001/scan    {"chain": "solana"|"base"|"robinhood", "token": "<addr>"}
+GET  http://127.0.0.1:3001/
+GET  http://127.0.0.1:3001/cases?days=1
 GET  http://127.0.0.1:3001/cases/{id}
 GET  http://127.0.0.1:3001/funnel?days=7
 ```
 
-`POST /scan` runs the same deterministic pipeline as `ff scan` and returns that verdict. A later single Floor Lead bot can hit `http://127.0.0.1:3001/scan`. This repo does not run that bot.
+`GET /` is a local read-only table of recent cases (verdict filter, funnel for the last day, case markdown + Layer A/B). It talks only to `http://127.0.0.1:3001`. `GET /cases?days=1` lists `case_id, chain, token, score, verdict, scanned_at` from `data/scans`. `POST /scan` runs the same deterministic pipeline as `ff scan` and returns that verdict. A later single Floor Lead bot can hit `http://127.0.0.1:3001/scan`. This repo does not run that bot.
 
 `ff api --host 0.0.0.0` is refused.
 
