@@ -1,19 +1,33 @@
-"""Pump.fun create listener. Polling is the default; WS is optional fallback."""
+"""Pump.fun create listener. Prefer logsSubscribe; reconnect on drop."""
 
 from __future__ import annotations
 
 import os
 import sys
 import time
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 
-from filter_floor.adapters.rpc import RpcError, SolanaRpc, classify_tx_rpc_error
+from filter_floor.adapters.rpc import (
+    RpcError,
+    SolanaRpc,
+    classify_tx_rpc_error,
+    sanitize_rpc_text,
+)
 from filter_floor.models import Chain, ScanResult
-from filter_floor.scanners.pumpfun import PUMP_PROGRAM_ID, PumpCreate, extract_pump_creates
+from filter_floor.scanners.pumpfun import (
+    PUMP_PROGRAM_ID,
+    PumpCreate,
+    extract_pump_create_stats,
+    logs_contain_create,
+    pump_ix_summaries,
+)
 
 DEFAULT_POLL_SECONDS = 5.0
 DEFAULT_SIG_LIMIT = 20
+MAX_WS_RECONNECTS = 10
+WS_PING_INTERVAL_S = 20
+WS_PING_TIMEOUT_S = 20
 
 ScanFn = Callable[[Chain, str], ScanResult]
 ErrFn = Callable[[str], None]
@@ -27,6 +41,10 @@ class PollPass:
     skipped_error: int = 0
     skipped_version: int = 0
     skipped_ratelimit: int = 0
+    log_create: int = 0
+    inner_create: int = 0
+    decoded: int = 0
+    undecoded_ixs: tuple[tuple[str, int], ...] = field(default_factory=tuple)
 
     @property
     def skipped_rpc(self) -> int:
@@ -45,7 +63,10 @@ class PollPass:
             f"null={self.skipped_null} "
             f"error={self.skipped_error} "
             f"version={self.skipped_version} "
-            f"ratelimit={self.skipped_ratelimit}"
+            f"ratelimit={self.skipped_ratelimit} "
+            f"log_create={self.log_create} "
+            f"inner_create={self.inner_create} "
+            f"decoded={self.decoded}"
         )
 
 
@@ -89,7 +110,11 @@ def poll_new_creates(
     delay_s: float = 0.0,
     sleep_fn=time.sleep,
 ) -> PollPass:
-    """One polling pass over Pump.fun program signatures. Unknown txs are skipped."""
+    """Count Pump.fun program signatures. Does not getTransaction on each sig.
+
+    Creates are decoded from logsSubscribe (or fetch_creates_for_logs) only.
+    """
+    _ = delay_s, sleep_fn
     try:
         signatures = rpc.get_signatures_for_address(PUMP_PROGRAM_ID, limit=limit)
     except RpcError as exc:
@@ -102,47 +127,144 @@ def poll_new_creates(
             skipped_ratelimit=1 if kind == "ratelimit" else 0,
         )
 
-    found: list[PumpCreate] = []
-    skipped_null = 0
-    skipped_error = 0
-    skipped_version = 0
-    skipped_ratelimit = 0
-    fetched = 0
-    pause = max(0.0, float(delay_s))
     for signature in signatures:
         if signature in seen_signatures:
             continue
         seen_signatures.add(signature)
-        if fetched and pause > 0:
-            sleep_fn(pause)
-        fetched += 1
-        try:
-            tx = rpc.get_transaction(signature)
-        except RpcError as exc:
-            kind = classify_tx_rpc_error(exc)
-            if kind == "ratelimit":
-                skipped_ratelimit += 1
-            elif kind == "version":
-                skipped_version += 1
-            else:
-                skipped_error += 1
-            continue
-        if not tx:
-            skipped_null += 1
-            continue
-        found.extend(extract_pump_creates(tx, signature=signature))
     return PollPass(
-        creates=found,
+        creates=[],
         signatures=len(signatures),
-        skipped_null=skipped_null,
-        skipped_error=skipped_error,
-        skipped_version=skipped_version,
-        skipped_ratelimit=skipped_ratelimit,
+        log_create=0,
+        inner_create=0,
+        decoded=0,
     )
 
 
+def fetch_creates_for_logs(
+    rpc: SolanaRpc,
+    signature: str,
+    logs: object,
+    *,
+    delay_s: float = 0.0,
+    sleep_fn=time.sleep,
+) -> PollPass:
+    """getTransaction only when logs contain Create / CreateV2."""
+    log_create = 1 if logs_contain_create(logs) else 0
+    if not signature or not log_create:
+        return PollPass(
+            creates=[],
+            signatures=1 if signature else 0,
+            log_create=0,
+            inner_create=0,
+            decoded=0,
+        )
+    if delay_s > 0:
+        sleep_fn(delay_s)
+    try:
+        tx = rpc.get_transaction(signature)
+    except RpcError as exc:
+        kind = classify_tx_rpc_error(exc)
+        return PollPass(
+            creates=[],
+            signatures=1,
+            skipped_error=1 if kind == "error" else 0,
+            skipped_version=1 if kind == "version" else 0,
+            skipped_ratelimit=1 if kind == "ratelimit" else 0,
+            log_create=log_create,
+            inner_create=0,
+            decoded=0,
+        )
+    if not tx:
+        return PollPass(
+            creates=[],
+            signatures=1,
+            skipped_null=1,
+            log_create=log_create,
+            inner_create=0,
+            decoded=0,
+        )
+    found, _tx_log_create, inner_create = extract_pump_create_stats(
+        tx, signature=signature
+    )
+    undecoded: tuple[tuple[str, int], ...] = ()
+    if not found:
+        undecoded = tuple(pump_ix_summaries(tx))
+    return PollPass(
+        creates=found,
+        signatures=1,
+        log_create=max(log_create, _tx_log_create),
+        inner_create=inner_create,
+        decoded=len(found),
+        undecoded_ixs=undecoded,
+    )
+
+
+def handle_create_poll(
+    poll: PollPass,
+    *,
+    do_scan: ScanFn,
+    seen_mints: set[str],
+    print_fn,
+    err_fn: ErrFn,
+    min_score_alert: int = 50,
+) -> list[ScanResult]:
+    """Print stats; scan every decoded=1 create; dump disc_hex on decoded=0."""
+    err_fn(poll.summary_line())
+    if poll.log_create and poll.decoded == 0:
+        rows = poll.undecoded_ixs or (("-", 0),)
+        for disc_hex, account_count in rows:
+            err_fn(f"disc_hex={disc_hex or '-'} account_count={account_count}")
+    results: list[ScanResult] = []
+    if poll.decoded < 1:
+        return results
+    for create in poll.creates:
+        result = _scan_decoded_create(
+            create,
+            do_scan=do_scan,
+            seen_mints=seen_mints,
+            print_fn=print_fn,
+            err_fn=err_fn,
+            min_score_alert=min_score_alert,
+        )
+        if result is not None:
+            results.append(result)
+    return results
+
+
+def _scan_decoded_create(
+    create: PumpCreate,
+    *,
+    do_scan: ScanFn,
+    seen_mints: set[str],
+    print_fn,
+    err_fn: ErrFn,
+    min_score_alert: int,
+) -> ScanResult | None:
+    _ = min_score_alert
+    mint = (create.mint or "").strip()
+    if mint and mint in seen_mints:
+        return None
+    try:
+        result = do_scan(Chain.solana, mint)
+    except Exception as exc:
+        _ = exc
+        err_fn(f"scan_error={type(exc).__name__}")
+        return None
+    if mint:
+        seen_mints.add(mint)
+    print_fn(
+        f"{result.case_id} {result.chain.value} {result.token} "
+        f"{result.score_0_100} {result.verdict.value}"
+    )
+    return result
+
+
 def _print_err(line: str) -> None:
-    print(line, file=sys.stderr)
+    print(line, file=sys.stderr, flush=True)
+
+
+def _print_out(line: str) -> None:
+    print(line, flush=True)
 
 
 def run_watch(
@@ -152,17 +274,20 @@ def run_watch(
     rpc: SolanaRpc | None = None,
     scan_fn: ScanFn | None = None,
     sleep_fn=time.sleep,
-    print_fn=print,
+    print_fn=None,
     err_fn: ErrFn | None = None,
     interval_s: float | None = None,
     delay_s: float | None = None,
     limit: int = DEFAULT_SIG_LIMIT,
+    seen_mints: set[str] | None = None,
+    seen_signatures: set[str] | None = None,
 ) -> list[ScanResult]:
-    """Poll Pump.fun creates, scan each new mint, write cases via scan_fn.
+    """Poll Pump.fun signatures for volume stats. Does not fetch every tx.
 
     Prints one line per token: case_id chain token score verdict.
     After each poll, prints
     signatures=N creates=M skipped_rpc=K null=X error=Y version=V ratelimit=R
+    log_create=A inner_create=B decoded=C
     on stderr. Does not open a browser. Dedupes by mint and signature.
     """
     from filter_floor.pipeline import run_scan
@@ -171,32 +296,33 @@ def run_watch(
     do_scan = scan_fn or (
         lambda chain, token: run_scan(chain, token, solana_rpc=client)
     )
+    write_out = print_fn or _print_out
     write_err = err_fn or _print_err
     wait = poll_interval_s() if interval_s is None else interval_s
     sig_limit = max(1, int(limit))
     tx_delay = tx_delay_s() if delay_s is None else max(0.0, float(delay_s))
-    seen_signatures: set[str] = set()
-    seen_mints: set[str] = set()
+    signatures = seen_signatures if seen_signatures is not None else set()
+    mints = seen_mints if seen_mints is not None else set()
     results: list[ScanResult] = []
 
     while True:
         poll = poll_new_creates(
             client,
-            seen_signatures,
+            signatures,
             limit=sig_limit,
             delay_s=tx_delay,
             sleep_fn=sleep_fn,
         )
-        write_err(poll.summary_line())
-        for create in _dedupe_creates(poll.creates, seen_mints):
-            result = do_scan(Chain.solana, create.mint)
-            results.append(result)
-            line = (
-                f"{result.case_id} {result.chain.value} {result.token} "
-                f"{result.score_0_100} {result.verdict.value}"
+        results.extend(
+            handle_create_poll(
+                poll,
+                do_scan=do_scan,
+                seen_mints=mints,
+                print_fn=write_out,
+                err_fn=write_err,
+                min_score_alert=min_score_alert,
             )
-            _ = min_score_alert
-            print_fn(line)
+        )
         if once:
             break
         sleep_fn(wait)
@@ -210,9 +336,13 @@ def run_ws_watch(
     once: bool = False,
     rpc: SolanaRpc | None = None,
     scan_fn: ScanFn | None = None,
-    print_fn=print,
+    print_fn=None,
+    err_fn: ErrFn | None = None,
+    delay_s: float | None = None,
+    sleep_fn=time.sleep,
+    seen_mints: set[str] | None = None,
 ) -> None:
-    """Optional logsSubscribe. On any WS error, callers should fall back to polling."""
+    """logsSubscribe for Pump program. Fetch txs only on Create / CreateV2 logs."""
     import asyncio
     import json
 
@@ -224,9 +354,14 @@ def run_ws_watch(
     do_scan = scan_fn or (
         lambda chain, token: run_scan(chain, token, solana_rpc=client)
     )
-    seen_mints: set[str] = set()
+    write_out = print_fn or _print_out
+    write_err = err_fn or _print_err
+    tx_delay = tx_delay_s() if delay_s is None else max(0.0, float(delay_s))
+    mints = seen_mints if seen_mints is not None else set()
+    pending_delay = False
 
     async def _run() -> None:
+        nonlocal pending_delay
         subscribe = {
             "jsonrpc": "2.0",
             "id": 1,
@@ -236,7 +371,11 @@ def run_ws_watch(
                 {"commitment": "confirmed"},
             ],
         }
-        async with websockets.connect(wss_url) as ws:
+        async with websockets.connect(
+            wss_url,
+            ping_interval=WS_PING_INTERVAL_S,
+            ping_timeout=WS_PING_TIMEOUT_S,
+        ) as ws:
             await ws.send(json.dumps(subscribe))
             while True:
                 raw = await ws.recv()
@@ -248,31 +387,27 @@ def run_ws_watch(
                 )
                 signature = value.get("signature")
                 logs = value.get("logs") or []
-                log_text = " ".join(logs) if isinstance(logs, list) else ""
-                if not signature or "Instruction: Create" not in log_text:
-                    if once:
-                        return
+                if not signature or not logs_contain_create(logs):
                     continue
-                try:
-                    tx = client.get_transaction(str(signature))
-                except RpcError:
-                    if once:
-                        return
-                    continue
-                if not tx:
-                    if once:
-                        return
-                    continue
-                for create in extract_pump_creates(tx, signature=str(signature)):
-                    if create.mint in seen_mints:
-                        continue
-                    seen_mints.add(create.mint)
-                    result = do_scan(Chain.solana, create.mint)
-                    print_fn(
-                        f"{result.case_id} {result.chain.value} {result.token} "
-                        f"{result.score_0_100} {result.verdict.value}"
-                    )
-                    _ = min_score_alert
+                pause = tx_delay if pending_delay else 0.0
+                pending_delay = True
+                poll = await asyncio.to_thread(
+                    fetch_creates_for_logs,
+                    client,
+                    str(signature),
+                    logs,
+                    delay_s=pause,
+                    sleep_fn=sleep_fn,
+                )
+                await asyncio.to_thread(
+                    handle_create_poll,
+                    poll,
+                    do_scan=do_scan,
+                    seen_mints=mints,
+                    print_fn=write_out,
+                    err_fn=write_err,
+                    min_score_alert=min_score_alert,
+                )
                 if once:
                     return
 
@@ -285,16 +420,36 @@ def start_watch(
     once: bool = False,
     rpc: SolanaRpc | None = None,
     scan_fn: ScanFn | None = None,
-    print_fn=print,
+    print_fn=None,
     err_fn: ErrFn | None = None,
     limit: int = DEFAULT_SIG_LIMIT,
 ) -> list[ScanResult] | None:
-    """Prefer polling. Attempt WS only when SOLANA_WSS_URL is set and once is false.
+    """Prefer logsSubscribe when SOLANA_WSS_URL is set.
 
-    WS is easy to flake; polling is the M1 path tests cover.
+    On WS drop: print one poll line, then reconnect (ping 20s / timeout 20s).
+    Max 10 reconnects, then stay on polling. Messages never include URL/key.
     """
+    write_out = print_fn or _print_out
+    write_err = err_fn or _print_err
     wss = os.environ.get("SOLANA_WSS_URL", "").strip()
-    if wss and not once:
+    seen_mints: set[str] = set()
+    seen_signatures: set[str] = set()
+    watch_kwargs = dict(
+        min_score_alert=min_score_alert,
+        rpc=rpc,
+        scan_fn=scan_fn,
+        print_fn=write_out,
+        err_fn=write_err,
+        seen_mints=seen_mints,
+        seen_signatures=seen_signatures,
+        limit=limit,
+    )
+    if not wss:
+        write_err("solana WS watch skipped: SOLANA_WSS_URL unset; falling back to polling")
+        return run_watch(once=once, **watch_kwargs)
+
+    reconnects = 0
+    while True:
         try:
             run_ws_watch(
                 wss_url=wss,
@@ -302,28 +457,19 @@ def start_watch(
                 once=once,
                 rpc=rpc,
                 scan_fn=scan_fn,
-                print_fn=print_fn,
+                print_fn=write_out,
+                err_fn=write_err,
+                seen_mints=seen_mints,
             )
             return None
-        except Exception:
-            print_fn("solana WS watch failed; falling back to polling")
-    return run_watch(
-        min_score_alert=min_score_alert,
-        once=once,
-        rpc=rpc,
-        scan_fn=scan_fn,
-        print_fn=print_fn,
-        err_fn=err_fn,
-        limit=limit,
-    )
-
-
-def _dedupe_creates(creates: Iterable[PumpCreate], seen_mints: set[str]) -> list[PumpCreate]:
-    out: list[PumpCreate] = []
-    for create in creates:
-        mint = create.mint.strip()
-        if not mint or mint in seen_mints:
-            continue
-        seen_mints.add(mint)
-        out.append(create)
-    return out
+        except Exception as exc:
+            reason = sanitize_rpc_text(f"{type(exc).__name__}: {exc}")
+            write_err(f"solana WS watch failed; falling back to polling: {reason}")
+            run_watch(once=True, **watch_kwargs)
+            if once:
+                return None
+            reconnects += 1
+            if reconnects > MAX_WS_RECONNECTS:
+                write_err("solana WS reconnects exhausted; staying on polling")
+                return run_watch(once=False, **watch_kwargs)
+            write_err(f"solana WS reconnect {reconnects}/{MAX_WS_RECONNECTS}")

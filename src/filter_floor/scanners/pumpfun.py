@@ -19,6 +19,7 @@ BONDING_CURVE_SEED = b"bonding-curve"
 CREATE_DISCRIMINATOR = hashlib.sha256(b"global:create").digest()[:8]
 CREATE_V2_DISCRIMINATOR = hashlib.sha256(b"global:create_v2").digest()[:8]
 KNOWN_CREATE_DISCS = {CREATE_DISCRIMINATOR, CREATE_V2_DISCRIMINATOR}
+CREATE_LOG_MARKERS = ("Instruction: Create", "Instruction: CreateV2")
 
 BIRTH_CONCENTRATION_NOTE = (
     "not graduated + creator can still dump curve inventory: caution detail, "
@@ -127,31 +128,89 @@ class PumpCreate:
     discriminator: str | None = None
 
 
-def extract_pump_creates(tx: dict, *, signature: str | None = None) -> list[PumpCreate]:
-    """Pull Pump.fun create mints from a mocked or RPC getTransaction payload.
+def logs_contain_create(logs: object) -> bool:
+    """True when Pump create / create_v2 appears in program logs."""
+    if isinstance(logs, str):
+        rows = [logs]
+    elif isinstance(logs, list):
+        rows = logs
+    else:
+        return False
+    for line in rows:
+        if not isinstance(line, str):
+            continue
+        if any(marker in line for marker in CREATE_LOG_MARKERS):
+            return True
+    return False
 
-    Unknown layouts are skipped (not guessed).
-    """
+
+def extract_pump_creates(tx: dict, *, signature: str | None = None) -> list[PumpCreate]:
+    found, _log_create, _inner_create = extract_pump_create_stats(tx, signature=signature)
+    return found
+
+
+def extract_pump_create_stats(
+    tx: dict,
+    *,
+    signature: str | None = None,
+) -> tuple[list[PumpCreate], int, int]:
+    """Return (decoded creates, log_create 0/1, inner_create count)."""
+    normalized = _normalize_tx(tx)
+    if normalized is None:
+        return [], 0, 0
+    logs = normalized.get("logs") or []
+    log_create = 1 if logs_contain_create(logs) else 0
+    inner_ixs = normalized.get("inner_instructions") or []
+    inner_create = sum(1 for ix in inner_ixs if _is_pump_create_ix(ix))
+    found = _creates_from_instructions(
+        list(normalized.get("instructions") or []),
+        logs=logs,
+        signature=signature,
+    )
+    return found, log_create, inner_create
+
+
+def pump_ix_summaries(tx: dict) -> list[tuple[str, int]]:
+    """(disc_hex, account_count) for each Pump program ix. No full tx dump."""
     normalized = _normalize_tx(tx)
     if normalized is None:
         return []
-    found: list[PumpCreate] = []
-    logs = normalized.get("logs") or []
-    log_says_create = any(
-        "Instruction: Create" in line or "Instruction: CreateV2" in line
-        for line in logs
-        if isinstance(line, str)
-    )
+    out: list[tuple[str, int]] = []
     for ix in normalized.get("instructions") or []:
-        program_id = ix.get("program_id")
-        if program_id != PUMP_PROGRAM_ID:
+        if ix.get("program_id") != PUMP_PROGRAM_ID:
             continue
         data = ix.get("data") or b""
-        if not isinstance(data, (bytes, bytearray)):
-            continue
-        if len(data) < 8 or bytes(data[:8]) not in KNOWN_CREATE_DISCS:
-            if log_says_create and bytes(data[:8]) not in KNOWN_CREATE_DISCS:
-                # Log looks like create but discriminator is unknown: skip, do not guess.
+        disc = ""
+        if isinstance(data, (bytes, bytearray)) and data:
+            disc = bytes(data[:8]).hex()
+        out.append((disc, len(ix.get("accounts") or [])))
+    return out
+
+
+def _is_pump_create_ix(ix: dict) -> bool:
+    if ix.get("program_id") != PUMP_PROGRAM_ID:
+        return False
+    data = ix.get("data") or b""
+    return isinstance(data, (bytes, bytearray)) and bytes(data[:8]) in KNOWN_CREATE_DISCS
+
+
+def _creates_from_instructions(
+    instructions: list[dict],
+    *,
+    logs: list,
+    signature: str | None,
+) -> list[PumpCreate]:
+    found: list[PumpCreate] = []
+    log_says_create = logs_contain_create(logs)
+    for ix in instructions:
+        if not _is_pump_create_ix(ix):
+            data = ix.get("data") or b""
+            if (
+                log_says_create
+                and ix.get("program_id") == PUMP_PROGRAM_ID
+                and isinstance(data, (bytes, bytearray))
+                and bytes(data[:8]) not in KNOWN_CREATE_DISCS
+            ):
                 continue
             continue
         accounts = ix.get("accounts") or []
@@ -159,6 +218,7 @@ def extract_pump_creates(tx: dict, *, signature: str | None = None) -> list[Pump
             continue
         mint = accounts[0]
         creator = accounts[7] if len(accounts) > 7 else None
+        data = ix.get("data") or b""
         found.append(
             PumpCreate(
                 mint=str(mint),
@@ -172,21 +232,27 @@ def extract_pump_creates(tx: dict, *, signature: str | None = None) -> list[Pump
 
 def _normalize_tx(tx: dict) -> dict | None:
     ixs = tx.get("instructions")
+    inner_mock = tx.get("inner_instructions")
     looks_like_mock = (
-        isinstance(ixs, list)
-        and "message" not in tx
+        "message" not in tx
+        and "transaction" not in tx
         and (
-            "account_keys" in tx
-            or any(
-                isinstance(ix, dict) and (ix.get("program_id") or ix.get("data_hex"))
-                for ix in ixs
-            )
+            isinstance(ixs, list)
+            or isinstance(inner_mock, list)
         )
     )
     if looks_like_mock:
+        outer = _normalize_mock_instructions(tx)
+        inner = _normalize_mock_instructions(
+            {"instructions": tx.get("inner_instructions") or []}
+        )
+        if not inner:
+            meta = tx.get("meta") if isinstance(tx.get("meta"), dict) else {}
+            inner = _inner_instructions(meta, _account_keys(tx.get("account_keys") or []))
         return {
             "logs": list(tx.get("logs") or []),
-            "instructions": _normalize_mock_instructions(tx),
+            "instructions": outer + inner,
+            "inner_instructions": inner,
         }
 
     inner = tx.get("transaction") if isinstance(tx.get("transaction"), dict) else tx
@@ -196,30 +262,77 @@ def _normalize_tx(tx: dict) -> dict | None:
     if not isinstance(message, dict):
         return None
     account_keys = _account_keys(message.get("accountKeys") or message.get("account_keys") or [])
-    raw_ixs = message.get("instructions") or []
-    instructions = []
-    for ix in raw_ixs:
-        if not isinstance(ix, dict):
-            continue
-        program_id = ix.get("programId") or ix.get("program_id")
-        if not program_id:
-            idx = ix.get("programIdIndex")
-            if isinstance(idx, int) and 0 <= idx < len(account_keys):
-                program_id = account_keys[idx]
-        accs = ix.get("accounts") or []
-        resolved = []
-        for acc in accs:
-            if isinstance(acc, int) and 0 <= acc < len(account_keys):
-                resolved.append(account_keys[acc])
-            elif isinstance(acc, str):
-                resolved.append(acc)
-        data = _ix_data_bytes(ix.get("data"))
-        instructions.append(
-            {"program_id": program_id, "accounts": resolved, "data": data}
-        )
     meta = tx.get("meta") if isinstance(tx.get("meta"), dict) else {}
+    loaded = meta.get("loadedAddresses") or {}
+    if isinstance(loaded, dict):
+        for group in ("writable", "readonly"):
+            for item in loaded.get(group) or []:
+                if isinstance(item, str):
+                    account_keys.append(item)
+                elif isinstance(item, dict) and item.get("pubkey"):
+                    account_keys.append(str(item["pubkey"]))
+    outer: list[dict] = []
+    for ix in message.get("instructions") or []:
+        parsed = _normalize_one_ix(ix, account_keys)
+        if parsed is not None:
+            outer.append(parsed)
+    inner_ixs = _inner_instructions(meta, account_keys)
     logs = meta.get("logMessages") or tx.get("logs") or []
-    return {"logs": list(logs), "instructions": instructions}
+    return {
+        "logs": list(logs),
+        "instructions": outer + inner_ixs,
+        "inner_instructions": inner_ixs,
+    }
+
+
+def _inner_instructions(meta: dict, account_keys: list[str]) -> list[dict]:
+    out: list[dict] = []
+    rows = meta.get("innerInstructions") or meta.get("inner_instructions") or []
+    if not isinstance(rows, list):
+        return out
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for ix in row.get("instructions") or []:
+            parsed = _normalize_one_ix(ix, account_keys)
+            if parsed is not None:
+                out.append(parsed)
+    return out
+
+
+def _normalize_one_ix(ix: object, account_keys: list[str]) -> dict | None:
+    if not isinstance(ix, dict):
+        return None
+    program_id = ix.get("programId") or ix.get("program_id")
+    if not program_id:
+        idx = ix.get("programIdIndex")
+        if isinstance(idx, int) and 0 <= idx < len(account_keys):
+            program_id = account_keys[idx]
+    accs = ix.get("accounts") or []
+    resolved = []
+    for acc in accs:
+        if isinstance(acc, int) and 0 <= acc < len(account_keys):
+            resolved.append(account_keys[acc])
+        elif isinstance(acc, str):
+            resolved.append(acc)
+    data = _ix_data_bytes(ix.get("data"))
+    parsed = ix.get("parsed")
+    if program_id == PUMP_PROGRAM_ID and isinstance(parsed, dict):
+        typ = str(parsed.get("type") or "").lower()
+        info = parsed.get("info") if isinstance(parsed.get("info"), dict) else {}
+        mint = info.get("mint") or info.get("tokenMint")
+        user = info.get("user") or info.get("creator")
+        if isinstance(mint, str) and mint and mint not in resolved:
+            resolved = [mint, *resolved]
+        if isinstance(user, str) and user:
+            while len(resolved) < 8:
+                resolved.append("")
+            resolved[7] = user
+        if typ in ("create", "create_v2") and (
+            len(data) < 8 or bytes(data[:8]) not in KNOWN_CREATE_DISCS
+        ):
+            data = CREATE_V2_DISCRIMINATOR if "v2" in typ else CREATE_DISCRIMINATOR
+    return {"program_id": program_id, "accounts": resolved, "data": data}
 
 
 def _normalize_mock_instructions(tx: dict) -> list[dict]:
@@ -255,6 +368,8 @@ def _account_keys(raw: list) -> list[str]:
 def _ix_data_bytes(data: object) -> bytes:
     if isinstance(data, (bytes, bytearray)):
         return bytes(data)
+    if isinstance(data, list) and data:
+        return _ix_data_bytes(data[0])
     if not isinstance(data, str) or not data:
         return b""
     try:

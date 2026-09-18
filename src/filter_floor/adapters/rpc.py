@@ -19,7 +19,7 @@ RETRYABLE_HTTP = frozenset({429, 503})
 RETRYABLE_RPC_CODES = frozenset({-32005})
 VERSION_RPC_CODES = frozenset({-32015})
 
-_URL_RE = re.compile(r"https?://\S+", re.I)
+_URL_RE = re.compile(r"(?:https?|wss?)://\S+", re.I)
 _API_KEY_RE = re.compile(r"(api[-_]?key=)[^&\s]+", re.I)
 
 

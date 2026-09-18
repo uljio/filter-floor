@@ -156,3 +156,70 @@ def test_unknown_pump_discriminator_is_skipped_not_guessed():
         ],
     }
     assert extract_pump_creates(tx) == []
+
+
+def test_extract_pump_create_from_inner_instructions():
+    from filter_floor.adapters.b58 import b58encode
+    from filter_floor.scanners.pumpfun import extract_pump_create_stats
+
+    mint = pubkey_from_byte(49)
+    creator = pubkey_from_byte(50)
+    tx = {
+        "transaction": {
+            "message": {
+                "accountKeys": [
+                    {"pubkey": mint, "signer": False, "writable": True},
+                    {"pubkey": creator, "signer": True, "writable": True},
+                    {"pubkey": PUMP_PROGRAM_ID, "signer": False, "writable": False},
+                ],
+                "instructions": [
+                    {
+                        "programId": "ComputeBudget111111111111111111111111111111",
+                        "accounts": [],
+                        "data": "",
+                    }
+                ],
+            }
+        },
+        "meta": {
+            "logMessages": ["Program log: Instruction: CreateV2"],
+            "innerInstructions": [
+                {
+                    "index": 0,
+                    "instructions": [
+                        {
+                            "programId": PUMP_PROGRAM_ID,
+                            "accounts": [
+                                mint, "a", "b", "c", "d", "e", "f", creator,
+                            ],
+                            "data": b58encode(CREATE_DISCRIMINATOR + b"\x00"),
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+    found, log_create, inner_create = extract_pump_create_stats(tx, signature="sig-inner")
+    assert log_create == 1
+    assert inner_create == 1
+    assert len(found) == 1
+    assert found[0].mint == mint
+    assert found[0].creator == creator
+    assert extract_pump_creates(tx, signature="sig-inner")[0].mint == mint
+
+
+def test_pump_ix_summaries_disc_hex_and_account_count():
+    from filter_floor.scanners.pumpfun import pump_ix_summaries
+
+    mint = pubkey_from_byte(61)
+    tx = {
+        "logs": ["Program log: Instruction: CreateV2"],
+        "instructions": [
+            {
+                "program_id": PUMP_PROGRAM_ID,
+                "accounts": [mint, "a"],
+                "data_hex": "aabbccdd11223344ff",
+            }
+        ],
+    }
+    assert pump_ix_summaries(tx) == [("aabbccdd11223344", 2)]

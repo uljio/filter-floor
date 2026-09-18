@@ -19,6 +19,9 @@ def test_sanitize_rpc_text_strips_url_and_api_key():
     keyed = sanitize_rpc_text("api-key=supersecret")
     assert "supersecret" not in keyed
     assert "api-key=[redacted]" in keyed
+    wss = sanitize_rpc_text("timed out connecting to wss://secret.example/key")
+    assert "secret.example" not in wss
+    assert "[rpc]" in wss
 
 
 def test_rpc_error_message_never_keeps_url():
