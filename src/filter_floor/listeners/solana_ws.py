@@ -8,7 +8,7 @@ import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
-from filter_floor.adapters.rpc import RpcError, SolanaRpc
+from filter_floor.adapters.rpc import RpcError, SolanaRpc, classify_tx_rpc_error
 from filter_floor.models import Chain, ScanResult
 from filter_floor.scanners.pumpfun import PUMP_PROGRAM_ID, PumpCreate, extract_pump_creates
 
@@ -25,10 +25,17 @@ class PollPass:
     signatures: int
     skipped_null: int = 0
     skipped_error: int = 0
+    skipped_version: int = 0
+    skipped_ratelimit: int = 0
 
     @property
     def skipped_rpc(self) -> int:
-        return self.skipped_null + self.skipped_error
+        return (
+            self.skipped_null
+            + self.skipped_error
+            + self.skipped_version
+            + self.skipped_ratelimit
+        )
 
     def summary_line(self) -> str:
         return (
@@ -36,7 +43,9 @@ class PollPass:
             f"creates={len(self.creates)} "
             f"skipped_rpc={self.skipped_rpc} "
             f"null={self.skipped_null} "
-            f"error={self.skipped_error}"
+            f"error={self.skipped_error} "
+            f"version={self.skipped_version} "
+            f"ratelimit={self.skipped_ratelimit}"
         )
 
 
@@ -51,12 +60,14 @@ def poll_interval_s() -> float:
     return max(1.0, value)
 
 
-DEFAULT_TX_DELAY_MS = 50.0
+DEFAULT_TX_DELAY_MS = 120.0
 
 
-def watch_tx_delay_s() -> float:
-    """Pause between getTransaction calls. SOLANA_WATCH_TX_DELAY_MS, default 50."""
-    raw = os.environ.get("SOLANA_WATCH_TX_DELAY_MS", "").strip()
+def tx_delay_s() -> float:
+    """Pause between getTransaction calls. SOLANA_TX_DELAY_MS, default 120."""
+    raw = os.environ.get("SOLANA_TX_DELAY_MS", "").strip()
+    if not raw:
+        raw = os.environ.get("SOLANA_WATCH_TX_DELAY_MS", "").strip()
     if not raw:
         return DEFAULT_TX_DELAY_MS / 1000.0
     try:
@@ -64,6 +75,10 @@ def watch_tx_delay_s() -> float:
     except ValueError:
         return DEFAULT_TX_DELAY_MS / 1000.0
     return max(0.0, ms / 1000.0)
+
+
+def watch_tx_delay_s() -> float:
+    return tx_delay_s()
 
 
 def poll_new_creates(
@@ -77,12 +92,21 @@ def poll_new_creates(
     """One polling pass over Pump.fun program signatures. Unknown txs are skipped."""
     try:
         signatures = rpc.get_signatures_for_address(PUMP_PROGRAM_ID, limit=limit)
-    except RpcError:
-        return PollPass(creates=[], signatures=0, skipped_null=0, skipped_error=1)
+    except RpcError as exc:
+        kind = classify_tx_rpc_error(exc)
+        return PollPass(
+            creates=[],
+            signatures=0,
+            skipped_error=1 if kind == "error" else 0,
+            skipped_version=1 if kind == "version" else 0,
+            skipped_ratelimit=1 if kind == "ratelimit" else 0,
+        )
 
     found: list[PumpCreate] = []
     skipped_null = 0
     skipped_error = 0
+    skipped_version = 0
+    skipped_ratelimit = 0
     fetched = 0
     pause = max(0.0, float(delay_s))
     for signature in signatures:
@@ -94,8 +118,14 @@ def poll_new_creates(
         fetched += 1
         try:
             tx = rpc.get_transaction(signature)
-        except RpcError:
-            skipped_error += 1
+        except RpcError as exc:
+            kind = classify_tx_rpc_error(exc)
+            if kind == "ratelimit":
+                skipped_ratelimit += 1
+            elif kind == "version":
+                skipped_version += 1
+            else:
+                skipped_error += 1
             continue
         if not tx:
             skipped_null += 1
@@ -106,6 +136,8 @@ def poll_new_creates(
         signatures=len(signatures),
         skipped_null=skipped_null,
         skipped_error=skipped_error,
+        skipped_version=skipped_version,
+        skipped_ratelimit=skipped_ratelimit,
     )
 
 
@@ -129,7 +161,8 @@ def run_watch(
     """Poll Pump.fun creates, scan each new mint, write cases via scan_fn.
 
     Prints one line per token: case_id chain token score verdict.
-    After each poll, prints signatures=N creates=M skipped_rpc=K null=X error=Y
+    After each poll, prints
+    signatures=N creates=M skipped_rpc=K null=X error=Y version=V ratelimit=R
     on stderr. Does not open a browser. Dedupes by mint and signature.
     """
     from filter_floor.pipeline import run_scan
@@ -141,7 +174,7 @@ def run_watch(
     write_err = err_fn or _print_err
     wait = poll_interval_s() if interval_s is None else interval_s
     sig_limit = max(1, int(limit))
-    tx_delay = watch_tx_delay_s() if delay_s is None else max(0.0, float(delay_s))
+    tx_delay = tx_delay_s() if delay_s is None else max(0.0, float(delay_s))
     seen_signatures: set[str] = set()
     seen_mints: set[str] = set()
     results: list[ScanResult] = []

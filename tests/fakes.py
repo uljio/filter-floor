@@ -15,6 +15,7 @@ class FakeSolanaRpc:
         fail: bool = False,
         fail_on: set[str] | None = None,
         fail_transactions: set[str] | None = None,
+        transaction_errors: dict[str, RpcError] | None = None,
         signatures_by_address: dict[str, list[str]] | None = None,
     ) -> None:
         self.accounts = dict(accounts or {})
@@ -24,6 +25,7 @@ class FakeSolanaRpc:
         self.fail = fail
         self.fail_on = set(fail_on or [])
         self.fail_transactions = set(fail_transactions or [])
+        self.transaction_errors = dict(transaction_errors or [])
         self.calls: list[tuple[str, str]] = []
         self.program_accounts: dict[str, list[tuple[str, AccountInfo]]] = {}
         self.token_largest: dict[str, list[dict]] = {}
@@ -51,10 +53,12 @@ class FakeSolanaRpc:
             return list(self.signatures_by_address[address])[:limit]
         return list(self.signatures)[:limit]
 
-    def get_transaction(self, signature: str) -> dict | None:
+    def get_transaction(self, signature: str, **_kwargs) -> dict | None:
         self.calls.append(("get_transaction", signature))
         if self.fail or "get_transaction" in self.fail_on:
             raise RpcError("mocked getTransaction failure")
+        if signature in self.transaction_errors:
+            raise self.transaction_errors[signature]
         if signature in self.fail_transactions:
             raise RpcError("mocked getTransaction failure")
         if signature not in self.transactions:

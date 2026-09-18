@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import re
+import time
 from dataclasses import dataclass
 
 import httpx
@@ -11,10 +13,55 @@ from filter_floor.adapters.b58 import b58decode
 
 DEFAULT_TIMEOUT_S = 8.0
 GPA_TIMEOUT_S = 8.0
+GET_TRANSACTION_ATTEMPTS = 3
+GET_TRANSACTION_BACKOFF_S = (1.0, 2.0)
+RETRYABLE_HTTP = frozenset({429, 503})
+RETRYABLE_RPC_CODES = frozenset({-32005})
+VERSION_RPC_CODES = frozenset({-32015})
+
+_URL_RE = re.compile(r"https?://\S+", re.I)
+_API_KEY_RE = re.compile(r"(api[-_]?key=)[^&\s]+", re.I)
 
 
 class RpcError(Exception):
-    """Transport, HTTP, or JSON-RPC failure. Callers must map this to UNKNOWN."""
+    """Transport, HTTP, or JSON-RPC failure. Callers must map this to UNKNOWN.
+
+    Messages must not include the RPC URL or API key.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        rpc_code: int | None = None,
+    ) -> None:
+        super().__init__(sanitize_rpc_text(message))
+        self.status_code = status_code
+        self.rpc_code = rpc_code
+
+
+def sanitize_rpc_text(text: str) -> str:
+    text = _URL_RE.sub("[rpc]", text)
+    return _API_KEY_RE.sub(r"\1[redacted]", text)
+
+
+def is_retryable_rpc_error(exc: RpcError) -> bool:
+    if exc.status_code in RETRYABLE_HTTP:
+        return True
+    return exc.rpc_code in RETRYABLE_RPC_CODES
+
+
+def classify_tx_rpc_error(exc: RpcError) -> str:
+    """Return ratelimit | version | error. Never includes URL."""
+    if is_retryable_rpc_error(exc):
+        return "ratelimit"
+    blob = f"{exc.rpc_code or ''} {exc}".lower()
+    if exc.rpc_code in VERSION_RPC_CODES or (
+        "maxsupportedtransactionversion" in blob or "transaction version" in blob
+    ):
+        return "version"
+    return "error"
 
 
 @dataclass(frozen=True)
@@ -72,13 +119,30 @@ class SolanaRpc:
             )
             response.raise_for_status()
             body = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            raise RpcError(f"{method} failed: {exc}") from exc
+        except httpx.HTTPStatusError as exc:
+            code = exc.response.status_code if exc.response is not None else None
+            raise RpcError(f"{method} failed: HTTP {code}", status_code=code) from None
+        except (httpx.HTTPError, ValueError):
+            raise RpcError(f"{method} failed: transport error") from None
         if not isinstance(body, dict):
             raise RpcError(f"{method} returned a non-object")
         error = body.get("error")
         if error:
-            raise RpcError(f"{method} json-rpc error: {error}")
+            rpc_code = None
+            short = "rpc error"
+            if isinstance(error, dict):
+                raw_code = error.get("code")
+                if isinstance(raw_code, int):
+                    rpc_code = raw_code
+                msg = error.get("message")
+                if isinstance(msg, str) and msg.strip():
+                    short = sanitize_rpc_text(msg.strip())[:200]
+                elif rpc_code is not None:
+                    short = f"code {rpc_code}"
+            raise RpcError(
+                f"{method} json-rpc error: {short}",
+                rpc_code=rpc_code,
+            )
         return body.get("result")
 
     def get_account_info(self, address: str) -> AccountInfo | None:
@@ -122,23 +186,38 @@ class SolanaRpc:
                 signatures.append(item)
         return signatures
 
-    def get_transaction(self, signature: str) -> dict | None:
-        result = self._call(
-            "getTransaction",
-            [
-                signature,
-                {
-                    "encoding": "jsonParsed",
-                    "commitment": "confirmed",
-                    "maxSupportedTransactionVersion": 0,
-                },
-            ],
-        )
-        if result is None:
-            return None
-        if not isinstance(result, dict):
-            raise RpcError("getTransaction: malformed result")
-        return result
+    def get_transaction(self, signature: str, *, sleep_fn=time.sleep) -> dict | None:
+        last: RpcError | None = None
+        for attempt in range(GET_TRANSACTION_ATTEMPTS):
+            try:
+                result = self._call(
+                    "getTransaction",
+                    [
+                        signature,
+                        {
+                            "encoding": "jsonParsed",
+                            "commitment": "confirmed",
+                            "maxSupportedTransactionVersion": 1,
+                        },
+                    ],
+                )
+            except RpcError as exc:
+                last = exc
+                if attempt < GET_TRANSACTION_ATTEMPTS - 1 and is_retryable_rpc_error(exc):
+                    delay = GET_TRANSACTION_BACKOFF_S[
+                        min(attempt, len(GET_TRANSACTION_BACKOFF_S) - 1)
+                    ]
+                    sleep_fn(delay)
+                    continue
+                raise
+            if result is None:
+                return None
+            if not isinstance(result, dict):
+                raise RpcError("getTransaction: malformed result")
+            return result
+        if last is not None:
+            raise last
+        return None
 
     def get_program_accounts(
         self,
