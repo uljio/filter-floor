@@ -138,9 +138,10 @@ def test_watch_solana_once_mocked(monkeypatch):
     from filter_floor.models import ScanResult, Verdict
     from tests.helpers import layer_a_unknown, layer_b_unknown, memory_clean
 
-    def fake_start_watch(*, min_score_alert: int, once: bool):
+    def fake_start_watch(*, min_score_alert: int, once: bool, limit: int = 20):
         assert once is True
         assert min_score_alert == 50
+        assert limit == 20
         now = datetime.now(timezone.utc)
         result = ScanResult(
             case_id="20260916-solana-WatchTok",
@@ -164,6 +165,33 @@ def test_watch_solana_once_mocked(monkeypatch):
     invoked = runner.invoke(app, ["watch", "--chain", "solana", "--once"])
     assert invoked.exit_code == 0, invoked.output
     assert "CAUTION" in invoked.output
+    assert "BUY" not in invoked.output
+
+
+def test_watch_solana_once_forwards_limit(monkeypatch):
+    seen: dict[str, int] = {}
+
+    def fake_start_watch(*, min_score_alert: int, once: bool, limit: int = 20):
+        seen["min_score_alert"] = min_score_alert
+        seen["once"] = once
+        seen["limit"] = limit
+
+    monkeypatch.setattr(
+        "filter_floor.listeners.solana_ws.start_watch", fake_start_watch
+    )
+    invoked = runner.invoke(
+        app, ["watch", "--chain", "solana", "--once", "--limit", "100"]
+    )
+    assert invoked.exit_code == 0, invoked.output
+    assert seen == {"min_score_alert": 50, "once": True, "limit": 100}
+
+
+def test_watch_limit_below_one_exits():
+    invoked = runner.invoke(
+        app, ["watch", "--chain", "solana", "--once", "--limit", "0"]
+    )
+    assert invoked.exit_code == 1
+    assert "limit must be >= 1" in invoked.output
     assert "BUY" not in invoked.output
 
 

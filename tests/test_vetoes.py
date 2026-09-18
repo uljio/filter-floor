@@ -82,6 +82,26 @@ def test_null_death_rate_with_prior_tokens_is_not_pass_filter():
     assert memory.death_rate is None
 
 
+def test_lp_fail_is_caution_not_avoid():
+    layer_a = layer_a_clean(lp_locked_or_burned=CheckStatus.FAIL)
+    _, decision = _decide(layer_a, layer_b_clean(), memory_clean())
+    assert decision.verdict is Verdict.CAUTION
+    assert decision.verdict is not Verdict.AVOID
+    assert not any("lp_locked_or_burned" in r for r in decision.veto_reasons)
+    assert any("lp_locked_or_burned" in r for r in decision.caution_reasons)
+
+
+def test_lp_fail_does_not_override_mint_avoid():
+    layer_a = layer_a_clean(
+        mint_authority_revoked=CheckStatus.FAIL,
+        lp_locked_or_burned=CheckStatus.FAIL,
+    )
+    _, decision = _decide(layer_a, layer_b_clean(), memory_clean())
+    assert decision.verdict is Verdict.AVOID
+    assert any("mint_authority_revoked" in r for r in decision.veto_reasons)
+    assert not any("lp_locked_or_burned" in r for r in decision.veto_reasons)
+
+
 def test_clean_low_score_is_pass_filter():
     from filter_floor.config import load_scoring
 

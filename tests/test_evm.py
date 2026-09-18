@@ -410,7 +410,10 @@ def test_lp_unlocked_nft_is_fail():
     layer_a = scanner.scan_layer_a(TOKEN)
     assert layer_a.lp_locked_or_burned is CheckStatus.FAIL
     decision = evaluate(layer_a, layer_b_unknown(), memory_clean(), compute_score(layer_a, layer_b_unknown(), memory_clean()))
-    assert decision.verdict is Verdict.AVOID
+    assert decision.verdict is Verdict.CAUTION
+    assert decision.verdict is not Verdict.AVOID
+    assert not any("lp_locked_or_burned" in r for r in decision.veto_reasons)
+    assert any("lp_locked_or_burned" in r for r in decision.caution_reasons)
 
 
 def test_lp_zero_liquidity_is_fail():

@@ -15,7 +15,7 @@ def compute_score(
 ) -> int:
     """Return a risk score in 0–100 (higher = more dangerous).
 
-    Mint/freeze/honeypot/LP fails are hard vetoes handled in vetoes.py.
+    Mint/freeze/honeypot fails are hard vetoes handled in vetoes.py.
     They are not diluted into this average. Caps from scoring.yaml still
     apply so a high bundle or death rate cannot look "safe" via empty metadata.
     """

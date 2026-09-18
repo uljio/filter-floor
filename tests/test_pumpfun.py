@@ -55,6 +55,7 @@ def test_bonding_curve_is_caution_detail_not_avoid():
     assert decision.verdict is not Verdict.AVOID
     assert decision.verdict is Verdict.CAUTION
     assert not any("bonding" in r.lower() and "FAIL" in r for r in decision.veto_reasons)
+    assert not any("lp_locked_or_burned" in r for r in decision.veto_reasons)
 
 
 def test_pumpfun_scanner_mint_fail_still_avoid():
@@ -110,6 +111,36 @@ def test_extract_pump_create_from_mocked_tx():
     assert found[0].mint == mint
     assert found[0].creator == creator
     assert found[0].signature == "sig1"
+
+
+def test_extract_pump_create_from_jsonparsed_rpc_shape():
+    from filter_floor.adapters.b58 import b58encode
+
+    mint = pubkey_from_byte(47)
+    creator = pubkey_from_byte(48)
+    tx = {
+        "transaction": {
+            "message": {
+                "accountKeys": [
+                    {"pubkey": mint, "signer": False, "writable": True},
+                    {"pubkey": creator, "signer": True, "writable": True},
+                    {"pubkey": PUMP_PROGRAM_ID, "signer": False, "writable": False},
+                ],
+                "instructions": [
+                    {
+                        "programId": PUMP_PROGRAM_ID,
+                        "accounts": [mint, "a", "b", "c", "d", "e", "f", creator],
+                        "data": b58encode(CREATE_DISCRIMINATOR + b"\x00"),
+                    }
+                ],
+            }
+        },
+        "meta": {"logMessages": ["Program log: Instruction: Create"]},
+    }
+    found = extract_pump_creates(tx, signature="sig-parsed")
+    assert len(found) == 1
+    assert found[0].mint == mint
+    assert found[0].creator == creator
 
 
 def test_unknown_pump_discriminator_is_skipped_not_guessed():

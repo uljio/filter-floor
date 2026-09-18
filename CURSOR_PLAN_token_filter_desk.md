@@ -211,14 +211,16 @@ Put numbers in `config/vetoes.yaml` and `config/scoring.yaml` so they can be tun
 - Mint authority active (Solana) or owner can mint (EVM) and not clearly renounced
 - Freeze authority active
 - Simulated sell fails for a fresh non-privileged wallet
-- LP tokens in deployer wallet / unlocked and pullable
 - Token-2022 permanent delegate / transfer hook / fee extension that can trap transfers (flag + AVOID until classified)
 - Deployer memory death_rate ≥ 0.70 with prior_token_count ≥ 5
 - same_funder_as_known_bad = FAIL
 - bundled_supply_pct ≥ 50
 
+Unlocked / not-burned LP (`lp_locked_or_burned` FAIL) is **not** a hard AVOID by itself.
+
 ### Caution (cannot PASS_FILTER)
 - Any Layer A field UNKNOWN
+- LP unlocked / not burned (`lp_locked_or_burned` FAIL). Missing LP account (still on Pump curve) stays UNKNOWN → CAUTION. Burned or known locker → PASS on that field. LP in a normal wallet / unknown locker → FAIL field, verdict CAUTION. If the largest LP holder is the Raydium pool/vault/AMM program, treat as PASS or UNKNOWN with a note — not FAIL-as-rug.
 - top10_excluding_lp_pct ≥ 30
 - bundled_supply_pct 20–50
 - deployer prior_token_count ≥ 10 with death_rate ≥ 0.40
@@ -230,7 +232,7 @@ Start with a transparent weighted sum, then cap:
 
 | Signal | Weight | Notes |
 |---|---|---|
-| mint/freeze/honeypot/LP fails | n/a | veto, do not average away |
+| mint/freeze/honeypot fails | n/a | veto, do not average away |
 | bundle + bundled_supply_pct | 25 | |
 | holder concentration ex-LP | 20 | |
 | funding cluster / known-bad funder | 25 | |

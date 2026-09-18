@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+import sys
 import time
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 
 from filter_floor.adapters.rpc import RpcError, SolanaRpc
 from filter_floor.models import Chain, ScanResult
@@ -14,6 +16,28 @@ DEFAULT_POLL_SECONDS = 5.0
 DEFAULT_SIG_LIMIT = 20
 
 ScanFn = Callable[[Chain, str], ScanResult]
+ErrFn = Callable[[str], None]
+
+
+@dataclass(frozen=True)
+class PollPass:
+    creates: list[PumpCreate]
+    signatures: int
+    skipped_null: int = 0
+    skipped_error: int = 0
+
+    @property
+    def skipped_rpc(self) -> int:
+        return self.skipped_null + self.skipped_error
+
+    def summary_line(self) -> str:
+        return (
+            f"signatures={self.signatures} "
+            f"creates={len(self.creates)} "
+            f"skipped_rpc={self.skipped_rpc} "
+            f"null={self.skipped_null} "
+            f"error={self.skipped_error}"
+        )
 
 
 def poll_interval_s() -> float:
@@ -27,31 +51,66 @@ def poll_interval_s() -> float:
     return max(1.0, value)
 
 
+DEFAULT_TX_DELAY_MS = 50.0
+
+
+def watch_tx_delay_s() -> float:
+    """Pause between getTransaction calls. SOLANA_WATCH_TX_DELAY_MS, default 50."""
+    raw = os.environ.get("SOLANA_WATCH_TX_DELAY_MS", "").strip()
+    if not raw:
+        return DEFAULT_TX_DELAY_MS / 1000.0
+    try:
+        ms = float(raw)
+    except ValueError:
+        return DEFAULT_TX_DELAY_MS / 1000.0
+    return max(0.0, ms / 1000.0)
+
+
 def poll_new_creates(
     rpc: SolanaRpc,
     seen_signatures: set[str],
     *,
     limit: int = DEFAULT_SIG_LIMIT,
-) -> list[PumpCreate]:
+    delay_s: float = 0.0,
+    sleep_fn=time.sleep,
+) -> PollPass:
     """One polling pass over Pump.fun program signatures. Unknown txs are skipped."""
     try:
         signatures = rpc.get_signatures_for_address(PUMP_PROGRAM_ID, limit=limit)
     except RpcError:
-        return []
+        return PollPass(creates=[], signatures=0, skipped_null=0, skipped_error=1)
 
     found: list[PumpCreate] = []
+    skipped_null = 0
+    skipped_error = 0
+    fetched = 0
+    pause = max(0.0, float(delay_s))
     for signature in signatures:
         if signature in seen_signatures:
             continue
         seen_signatures.add(signature)
+        if fetched and pause > 0:
+            sleep_fn(pause)
+        fetched += 1
         try:
             tx = rpc.get_transaction(signature)
         except RpcError:
+            skipped_error += 1
             continue
         if not tx:
+            skipped_null += 1
             continue
         found.extend(extract_pump_creates(tx, signature=signature))
-    return found
+    return PollPass(
+        creates=found,
+        signatures=len(signatures),
+        skipped_null=skipped_null,
+        skipped_error=skipped_error,
+    )
+
+
+def _print_err(line: str) -> None:
+    print(line, file=sys.stderr)
 
 
 def run_watch(
@@ -62,12 +121,16 @@ def run_watch(
     scan_fn: ScanFn | None = None,
     sleep_fn=time.sleep,
     print_fn=print,
+    err_fn: ErrFn | None = None,
     interval_s: float | None = None,
+    delay_s: float | None = None,
+    limit: int = DEFAULT_SIG_LIMIT,
 ) -> list[ScanResult]:
     """Poll Pump.fun creates, scan each new mint, write cases via scan_fn.
 
     Prints one line per token: case_id chain token score verdict.
-    Does not open a browser. Dedupes by mint and signature.
+    After each poll, prints signatures=N creates=M skipped_rpc=K null=X error=Y
+    on stderr. Does not open a browser. Dedupes by mint and signature.
     """
     from filter_floor.pipeline import run_scan
 
@@ -75,14 +138,24 @@ def run_watch(
     do_scan = scan_fn or (
         lambda chain, token: run_scan(chain, token, solana_rpc=client)
     )
+    write_err = err_fn or _print_err
     wait = poll_interval_s() if interval_s is None else interval_s
+    sig_limit = max(1, int(limit))
+    tx_delay = watch_tx_delay_s() if delay_s is None else max(0.0, float(delay_s))
     seen_signatures: set[str] = set()
     seen_mints: set[str] = set()
     results: list[ScanResult] = []
 
     while True:
-        creates = poll_new_creates(client, seen_signatures)
-        for create in _dedupe_creates(creates, seen_mints):
+        poll = poll_new_creates(
+            client,
+            seen_signatures,
+            limit=sig_limit,
+            delay_s=tx_delay,
+            sleep_fn=sleep_fn,
+        )
+        write_err(poll.summary_line())
+        for create in _dedupe_creates(poll.creates, seen_mints):
             result = do_scan(Chain.solana, create.mint)
             results.append(result)
             line = (
@@ -180,6 +253,8 @@ def start_watch(
     rpc: SolanaRpc | None = None,
     scan_fn: ScanFn | None = None,
     print_fn=print,
+    err_fn: ErrFn | None = None,
+    limit: int = DEFAULT_SIG_LIMIT,
 ) -> list[ScanResult] | None:
     """Prefer polling. Attempt WS only when SOLANA_WSS_URL is set and once is false.
 
@@ -205,6 +280,8 @@ def start_watch(
         rpc=rpc,
         scan_fn=scan_fn,
         print_fn=print_fn,
+        err_fn=err_fn,
+        limit=limit,
     )
 
 

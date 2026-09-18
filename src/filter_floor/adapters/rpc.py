@@ -10,6 +10,7 @@ import httpx
 from filter_floor.adapters.b58 import b58decode
 
 DEFAULT_TIMEOUT_S = 8.0
+GPA_TIMEOUT_S = 8.0
 
 
 class RpcError(Exception):
@@ -49,16 +50,25 @@ class SolanaRpc:
 
     def _client(self) -> httpx.Client:
         if self._http is None:
-            self._http = httpx.Client(timeout=self._timeout_s)
+            self._http = httpx.Client(
+                timeout=httpx.Timeout(
+                    connect=min(5.0, self._timeout_s),
+                    read=self._timeout_s,
+                    write=self._timeout_s,
+                    pool=5.0,
+                )
+            )
         return self._http
 
-    def _call(self, method: str, params: list) -> object:
+    def _call(self, method: str, params: list, *, timeout_s: float | None = None) -> object:
         if not self.url:
             raise RpcError("SOLANA_RPC_URL is not set")
+        timeout = timeout_s if timeout_s is not None else self._timeout_s
         try:
             response = self._client().post(
                 self.url,
                 json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+                timeout=timeout,
             )
             response.raise_for_status()
             body = response.json()
@@ -118,7 +128,7 @@ class SolanaRpc:
             [
                 signature,
                 {
-                    "encoding": "json",
+                    "encoding": "jsonParsed",
                     "commitment": "confirmed",
                     "maxSupportedTransactionVersion": 0,
                 },
@@ -140,7 +150,11 @@ class SolanaRpc:
         opts: dict = {"encoding": "base64", "commitment": "confirmed"}
         if filters:
             opts["filters"] = filters
-        result = self._call("getProgramAccounts", [program_id, opts])
+        result = self._call(
+            "getProgramAccounts",
+            [program_id, opts],
+            timeout_s=GPA_TIMEOUT_S,
+        )
         if result is None:
             return []
         if not isinstance(result, list):

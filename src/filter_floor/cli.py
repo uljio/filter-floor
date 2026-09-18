@@ -88,12 +88,20 @@ def watch(
         "--once",
         help="Single poll pass then exit.",
     ),
+    limit: int = typer.Option(
+        20,
+        "--limit",
+        help="Solana: Pump.fun program signatures per poll. Default 20.",
+    ),
 ) -> None:
     """Watch new launches. Solana polls Pump.fun; Base polls Uniswap V3 PoolCreated."""
     if chain is Chain.robinhood:
         typer.echo(
             "Robinhood watch disabled until Pons factory is filled and ROBINHOOD_ENABLED=1"
         )
+        raise typer.Exit(code=1)
+    if limit < 1:
+        typer.echo("limit must be >= 1", err=True)
         raise typer.Exit(code=1)
     if chain is Chain.base:
         from filter_floor.listeners.evm_ws import start_watch as start_base_watch
@@ -102,7 +110,7 @@ def watch(
         return
     from filter_floor.listeners.solana_ws import start_watch
 
-    start_watch(min_score_alert=min_score_alert, once=once)
+    start_watch(min_score_alert=min_score_alert, once=once, limit=limit)
 
 
 @app.command()

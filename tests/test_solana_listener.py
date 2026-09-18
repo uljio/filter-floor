@@ -33,14 +33,59 @@ def test_poll_new_creates_parses_mocked_program_sigs():
     )
     seen: set[str] = set()
     first = poll_new_creates(rpc, seen)
-    assert [c.mint for c in first] == [mint]
+    assert [c.mint for c in first.creates] == [mint]
+    assert first.signatures == 2
+    assert first.skipped_rpc == 0
+    assert first.summary_line() == "signatures=2 creates=1 skipped_rpc=0 null=0 error=0"
     second = poll_new_creates(rpc, seen)
-    assert second == []
+    assert second.creates == []
+    assert second.signatures == 2
+    assert second.skipped_rpc == 0
+    assert second.skipped_null == 0
+    assert second.skipped_error == 0
 
 
 def test_poll_rpc_failure_returns_empty_not_invented_mints():
     rpc = FakeSolanaRpc(fail=True)
-    assert poll_new_creates(rpc, set()) == []
+    poll = poll_new_creates(rpc, set())
+    assert poll.creates == []
+    assert poll.signatures == 0
+    assert poll.skipped_rpc == 1
+    assert poll.skipped_null == 0
+    assert poll.skipped_error == 1
+    assert poll.summary_line() == "signatures=0 creates=0 skipped_rpc=1 null=0 error=1"
+
+
+def test_poll_respects_limit_and_counts_skipped_rpc():
+    mint = pubkey_from_byte(53)
+    rpc = FakeSolanaRpc(
+        signatures=[f"sig-{i}" for i in range(10)],
+        transactions={"sig-0": _create_tx(mint), "sig-1": None},
+        fail_transactions={"sig-2"},
+    )
+    poll = poll_new_creates(rpc, set(), limit=3)
+    assert poll.signatures == 3
+    assert [c.mint for c in poll.creates] == [mint]
+    assert poll.skipped_rpc == 2
+    assert poll.skipped_null == 1
+    assert poll.skipped_error == 1
+    assert poll.summary_line() == "signatures=3 creates=1 skipped_rpc=2 null=1 error=1"
+
+
+def test_poll_delays_between_get_transaction_calls():
+    mint = pubkey_from_byte(54)
+    rpc = FakeSolanaRpc(
+        signatures=["sig-a", "sig-b"],
+        transactions={"sig-a": _create_tx(mint), "sig-b": _create_tx(mint)},
+    )
+    sleeps: list[float] = []
+    poll_new_creates(
+        rpc,
+        set(),
+        delay_s=0.06,
+        sleep_fn=sleeps.append,
+    )
+    assert sleeps == [0.06]
 
 
 def test_run_watch_once_scans_new_mint():
@@ -68,12 +113,16 @@ def test_run_watch_once_scans_new_mint():
         )
 
     lines: list[str] = []
+    err: list[str] = []
     results = run_watch(
         once=True,
         rpc=rpc,
         scan_fn=scan_fn,
         print_fn=lines.append,
+        err_fn=err.append,
         interval_s=0,
+        delay_s=0,
+        limit=20,
     )
     assert scanned == [mint]
     assert len(results) == 1
@@ -81,3 +130,5 @@ def test_run_watch_once_scans_new_mint():
     assert "CAUTION" in lines[0]
     assert "BUY" not in lines[0]
     assert mint in lines[0]
+    assert err == ["signatures=1 creates=1 skipped_rpc=0 null=0 error=0"]
+    assert "BUY" not in err[0]

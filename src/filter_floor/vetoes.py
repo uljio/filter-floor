@@ -123,6 +123,10 @@ def collect_caution_reasons(
     hard_bundle = float(cfg["hard_vetoes"]["bundled_supply_pct"])
     reasons: list[str] = []
 
+    for field in caution.get("layer_a_fail") or []:
+        if getattr(layer_a, field) == CheckStatus.FAIL:
+            reasons.append(f"layer_a.{field} is FAIL")
+
     if caution.get("any_layer_a_unknown"):
         for field in LAYER_A_FIELDS:
             if getattr(layer_a, field) == CheckStatus.UNKNOWN:

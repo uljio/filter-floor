@@ -2,10 +2,10 @@
 
 hard_vetoes:
   # Layer A FAIL on these fields is always AVOID.
+  # lp_locked_or_burned FAIL is caution (unlocked LP), not a hard AVOID.
   layer_a_fail:
     - mint_authority_revoked
     - freeze_authority_revoked
-    - lp_locked_or_burned
     - honeypot_or_unsellable
     - owner_or_upgrade_risk
     - token2022_or_hook_risk
@@ -16,6 +16,9 @@ hard_vetoes:
   bundled_supply_pct: 50
 
 caution:
+  # Unlocked / not-burned LP cannot PASS_FILTER, but is not AVOID by itself.
+  layer_a_fail:
+    - lp_locked_or_burned
   any_layer_a_unknown: true
   # Fail-closed: incomplete graph facts cannot PASS_FILTER.
   any_layer_b_unknown: true

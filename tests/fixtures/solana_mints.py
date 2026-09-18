@@ -50,6 +50,15 @@ def mint_with_freeze_authority() -> bytes:
     )
 
 
+def mint_with_mint_and_freeze_authority() -> bytes:
+    return pack_mint(
+        mint_authority=AUTH_MINT,
+        supply=SUPPLY,
+        decimals=DECIMALS,
+        freeze_authority=AUTH_FREEZE,
+    )
+
+
 def mint_authorities_revoked() -> bytes:
     return pack_mint(
         mint_authority=None,
