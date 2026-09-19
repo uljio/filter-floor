@@ -97,13 +97,13 @@ Without `--i-understand` the command refuses and leaves files in place.
 
 `ff label --due` labels any 1h / 6h / 24h horizon whose due time has passed. Each `ff scan` records those due times on the case (`data/outcomes/{case_id}.json` and the case markdown).
 
-It uses DexScreener (or a native price/liquidity snapshot if one is available). If there is no quote, no pair, or the request fails, the horizon is **`unknown`**. Filter Floor does not invent `survived` or `rugged`.
+It uses DexScreener (or a native price/liquidity snapshot if one is available). Each DexScreener HTTP call has a **10s** timeout; a hung request is skipped (`timeout`) instead of blocking the run. At most **20** horizons are labeled per run (`--limit`). If there is no quote, no pair, or the request fails, the horizon is **`unknown`**. Filter Floor does not invent `survived` or `rugged`.
 
 ```powershell
-ff label --due
+ff label --due --limit 20
 ```
 
-Prints one line per labeled horizon: `case_id horizon label`. Labels are `rugged`, `bled`, `survived`, or `unknown`. CLI output never says BUY.
+Prints `due=N` immediately, then one line per horizon: `case_id horizon label` (or `skip` / `timeout`). Labels are `rugged`, `bled`, `survived`, or `unknown`. CLI output never says BUY.
 
 Death labels used by deployer memory (only when evidence exists):
 

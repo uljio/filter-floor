@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import sys
+
 import typer
 from dotenv import load_dotenv
 
 from filter_floor.explain import explain_scan
-from filter_floor.labeling import label_due
+from filter_floor.labeling import DEFAULT_LABEL_LIMIT, label_due
 from filter_floor.models import Chain
 from filter_floor.pipeline import data_dir_from_env, run_scan
 from filter_floor.storage.cases import read_case_md, read_scan
@@ -113,21 +115,36 @@ def watch(
     start_watch(min_score_alert=min_score_alert, once=once, limit=limit)
 
 
+def _echo(line: str) -> None:
+    typer.echo(line)
+    try:
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
 @app.command()
 def label(
     due: bool = typer.Option(False, "--due", help="label outcomes that are due"),
+    limit: int = typer.Option(
+        DEFAULT_LABEL_LIMIT,
+        "--limit",
+        help="Max horizons to label this run. Default 20.",
+    ),
 ) -> None:
     """Label due 1h/6h/24h outcomes from DexScreener or native quotes. Else unknown."""
     if not due:
         typer.echo("label requires --due")
         raise typer.Exit(code=1)
-    labeled = label_due(data_dir_from_env())
-    if not labeled:
-        typer.echo("labeled 0 due horizon(s)")
-        return
-    for item in labeled:
-        typer.echo(f"{item.case_id} {item.horizon} {item.label.value}")
-    typer.echo(f"labeled {len(labeled)} due horizon(s)")
+    if limit < 1:
+        typer.echo("limit must be >= 1", err=True)
+        raise typer.Exit(code=1)
+    labeled = label_due(
+        data_dir_from_env(),
+        limit=limit,
+        progress=_echo,
+    )
+    _echo(f"labeled {len(labeled)} due horizon(s)")
 
 
 @app.command()

@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 from typer.testing import CliRunner
 
-from filter_floor.adapters.dexscreener import MarketSnapshot, fetch_dexscreener
+from filter_floor.adapters.dexscreener import DEFAULT_TIMEOUT_S, MarketSnapshot, fetch_dexscreener
 from filter_floor.cli import app
 from filter_floor.labeling import classify_snapshot, label_due, outcome_for_case
 from filter_floor.models import Chain, Outcome, OutcomeLabel, ScanResult, Verdict
@@ -256,8 +256,10 @@ def test_ff_label_due_cli_writes_outcome_no_buy(tmp_path, monkeypatch):
         return MarketSnapshot(source="dexscreener", error="offline")
 
     monkeypatch.setattr("filter_floor.labeling.fetch_market_snapshot", fake_fetch)
-    invoked = runner.invoke(app, ["label", "--due"])
+    invoked = runner.invoke(app, ["label", "--due", "--limit", "20"])
     assert invoked.exit_code == 0, invoked.output
+    lines = [line for line in invoked.output.splitlines() if line.strip()]
+    assert lines[0].startswith("due=")
     assert "BUY" not in invoked.output
     assert result.case_id in invoked.output
     assert "unknown" in invoked.output
@@ -301,3 +303,90 @@ def test_dexscreener_http_error_is_unknown_not_survived():
     decision = classify_snapshot(snap)
     assert decision.label is OutcomeLabel.unknown
     assert decision.label is not OutcomeLabel.survived
+
+
+def test_label_due_prints_due_and_respects_limit(tmp_path):
+    lines: list[str] = []
+    for i in range(3):
+        _write_scan(
+            tmp_path,
+            _result(token=f"LimTok{i}", scanned_at=NOW - timedelta(hours=25)),
+        )
+    labeled = label_due(
+        tmp_path,
+        now=NOW,
+        limit=4,
+        market_fetch=lambda chain, token: MarketSnapshot(source="mock", error="offline"),
+        progress=lines.append,
+    )
+    assert lines[0] == "due=9"
+    assert len(labeled) == 4
+    assert len(lines) == 5
+    for line in lines[1:]:
+        parts = line.split()
+        assert len(parts) == 3
+        assert parts[2] in {"unknown", "skip", "timeout", "rugged", "bled", "survived"}
+
+
+def test_label_due_timeout_progress(tmp_path):
+    import time
+
+    result = _write_scan(
+        tmp_path, _result(token="HangTok", scanned_at=NOW - timedelta(hours=2))
+    )
+    lines: list[str] = []
+
+    def hang(chain, token):
+        _ = chain, token
+        time.sleep(5)
+        return MarketSnapshot(source="mock", error="late")
+
+    labeled = label_due(
+        tmp_path,
+        now=NOW,
+        market_fetch=hang,
+        fetch_timeout_s=0.2,
+        progress=lines.append,
+    )
+    assert lines[0].startswith("due=")
+    assert any(line.endswith(" timeout") for line in lines[1:])
+    assert labeled
+    assert labeled[0].case_id == result.case_id
+    assert labeled[0].label is OutcomeLabel.unknown
+
+
+def test_label_due_skip_on_fetch_error(tmp_path):
+    result = _write_scan(
+        tmp_path, _result(token="SkipTok", scanned_at=NOW - timedelta(hours=2))
+    )
+    lines: list[str] = []
+
+    def boom(chain, token):
+        _ = chain, token
+        raise RuntimeError("nope")
+
+    labeled = label_due(
+        tmp_path,
+        now=NOW,
+        market_fetch=boom,
+        progress=lines.append,
+    )
+    assert any(line.endswith(" skip") for line in lines[1:])
+    assert labeled
+    assert labeled[0].case_id == result.case_id
+    assert labeled[0].label is OutcomeLabel.unknown
+
+
+def test_dexscreener_timeout_exception_is_timeout():
+    class Boom:
+        def get(self, url, timeout=None):
+            _ = url, timeout
+            raise httpx.TimeoutException("ReadTimeout")
+
+        def close(self):
+            return None
+
+    snap = fetch_dexscreener(Chain.solana, "mint111", http=Boom())  # type: ignore[arg-type]
+    assert snap.error == "timeout"
+    assert not snap.has_evidence
+    assert DEFAULT_TIMEOUT_S == 10.0

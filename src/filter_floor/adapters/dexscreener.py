@@ -11,7 +11,7 @@ from filter_floor.config import load_outcomes
 from filter_floor.models import Chain
 
 DEFAULT_URL_TEMPLATE = "https://api.dexscreener.com/latest/dex/tokens/{token}"
-DEFAULT_TIMEOUT_S = 8.0
+DEFAULT_TIMEOUT_S = 10.0
 
 # DexScreener chainId values that match Filter Floor chains.
 _CHAIN_IDS = {
@@ -60,13 +60,26 @@ def fetch_dexscreener(
     cfg = load_outcomes().get("dexscreener") or {}
     template = url_template or cfg.get("url_template") or DEFAULT_URL_TEMPLATE
     timeout_s = float(cfg.get("timeout_s") or DEFAULT_TIMEOUT_S)
+    timeout = httpx.Timeout(
+        timeout_s,
+        connect=timeout_s,
+        read=timeout_s,
+        write=timeout_s,
+        pool=timeout_s,
+    )
     url = str(template).replace("{token}", token.strip())
     owns = http is None
-    client = http or httpx.Client(timeout=timeout_s)
+    client = http or httpx.Client(timeout=timeout)
     try:
-        response = client.get(url)
+        response = client.get(url, timeout=timeout)
         response.raise_for_status()
         payload = response.json()
+    except httpx.TimeoutException:
+        return MarketSnapshot(
+            source="dexscreener",
+            error="timeout",
+            details={"TODO(verify)": "DexScreener timeout; label unknown"},
+        )
     except (httpx.HTTPError, ValueError) as exc:
         return MarketSnapshot(
             source="dexscreener",

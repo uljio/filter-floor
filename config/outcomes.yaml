@@ -8,4 +8,4 @@ drawdown_bled: 0.50
 
 dexscreener:
   url_template: "https://api.dexscreener.com/latest/dex/tokens/{token}"
-  timeout_s: 8.0
+  timeout_s: 10.0
