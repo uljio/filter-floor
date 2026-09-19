@@ -139,6 +139,11 @@ def test_fetch_creates_for_logs_only_on_create_markers():
     assert skip.creates == []
     assert skip.log_create == 0
     assert skip.decoded == 0
+    skip_idem = fetch_creates_for_logs(
+        rpc, "sig-swap", ["Program log: Instruction: CreateIdempotent"]
+    )
+    assert skip_idem.log_create == 0
+    assert skip_idem.decoded == 0
     assert not any(c[0] == "get_transaction" for c in rpc.calls)
 
     sleeps: list[float] = []
@@ -263,12 +268,13 @@ def test_start_watch_prints_sanitized_ws_failure(monkeypatch):
         err_fn=err.append,
         limit=1,
     )
-    assert any("falling back to polling" in line for line in err)
+    assert any(line.startswith("ws_down:") for line in err)
     blob = " ".join(err)
     assert "wss://" not in blob
     assert "secret.example" not in blob
     assert "abc" not in blob
     assert "RuntimeError" in blob
+    assert "falling back to polling" not in blob
     assert not any(c[0] == "get_transaction" for c in rpc.calls)
 
 
@@ -345,7 +351,7 @@ def test_scan_error_prints_type_not_url():
     assert "https://" not in blob
 
 
-def test_decoded_zero_prints_disc_hex_and_account_count():
+def test_decoded_zero_prints_only_known_create_discs():
     mint = pubkey_from_byte(60)
     rpc = FakeSolanaRpc(
         transactions={
@@ -354,9 +360,19 @@ def test_decoded_zero_prints_disc_hex_and_account_count():
                 "instructions": [
                     {
                         "program_id": PUMP_PROGRAM_ID,
-                        "accounts": [mint, "a", "b"],
-                        "data_hex": "aabbccdd11223344",
-                    }
+                        "accounts": [],
+                        "data_hex": CREATE_DISCRIMINATOR.hex(),
+                    },
+                    {
+                        "program_id": PUMP_PROGRAM_ID,
+                        "accounts": [mint],
+                        "data_hex": "e445a52e51cb9a1d",
+                    },
+                    {
+                        "program_id": PUMP_PROGRAM_ID,
+                        "accounts": [mint] * 8,
+                        "data_hex": "a572670079cef751",
+                    },
                 ],
             }
         }
@@ -365,7 +381,7 @@ def test_decoded_zero_prints_disc_hex_and_account_count():
         rpc, "sig-u", ["Program log: Instruction: CreateV2"]
     )
     assert poll.decoded == 0
-    assert poll.undecoded_ixs == (("aabbccdd11223344", 3),)
+    assert poll.undecoded_ixs == ((CREATE_DISCRIMINATOR.hex(), 0),)
     err: list[str] = []
     handle_create_poll(
         poll,
@@ -374,21 +390,54 @@ def test_decoded_zero_prints_disc_hex_and_account_count():
         print_fn=lambda _line: None,
         err_fn=err.append,
     )
-    assert "disc_hex=aabbccdd11223344 account_count=3" in err
+    assert f"disc_hex={CREATE_DISCRIMINATOR.hex()} account_count=0" in err
+    assert not any("e445a52e51cb9a1d" in line for line in err)
+    assert not any("a572670079cef751" in line for line in err)
 
 
-def test_ws_drop_polls_once_then_reconnects(monkeypatch):
+def test_event_and_sell_discs_do_not_print_decoded_zero():
+    mint = pubkey_from_byte(62)
+    rpc = FakeSolanaRpc(
+        transactions={
+            "sig-ev": {
+                "logs": ["Program log: Instruction: Create"],
+                "instructions": [
+                    {
+                        "program_id": PUMP_PROGRAM_ID,
+                        "accounts": [mint],
+                        "data_hex": "e445a52e51cb9a1d",
+                    }
+                ],
+            }
+        }
+    )
+    poll = fetch_creates_for_logs(
+        rpc, "sig-ev", ["Program log: Instruction: Create"]
+    )
+    assert poll.decoded == 0
+    assert poll.undecoded_ixs == ()
+    err: list[str] = []
+    handle_create_poll(
+        poll,
+        do_scan=lambda chain, token: (_ for _ in ()).throw(AssertionError("no scan")),
+        seen_mints=set(),
+        print_fn=lambda _line: None,
+        err_fn=err.append,
+    )
+    assert not any(line.startswith("disc_hex=") for line in err)
+
+
+def test_ws_drop_retries_ws_not_polling(monkeypatch):
     ws_n = {"n": 0}
-    polls: list[dict] = []
+    sleeps: list[float] = []
 
     def fake_ws(**_kwargs):
         ws_n["n"] += 1
         if ws_n["n"] < 2:
             raise ConnectionError("keepalive ping timeout")
 
-    def fake_poll(**kwargs):
-        polls.append(kwargs)
-        return []
+    def fake_poll(**_kwargs):
+        raise AssertionError("polling must not be the detector")
 
     monkeypatch.setenv("SOLANA_WSS_URL", "wss://example.invalid")
     monkeypatch.setattr("filter_floor.listeners.solana_ws.run_ws_watch", fake_ws)
@@ -401,12 +450,24 @@ def test_ws_drop_polls_once_then_reconnects(monkeypatch):
         print_fn=lambda _line: None,
         err_fn=err.append,
         limit=1,
+        sleep_fn=sleeps.append,
     )
     assert ws_n["n"] == 2
-    assert polls[0]["once"] is True
-    assert all(p["once"] is True for p in polls)
-    assert any("reconnect 1/10" in line for line in err)
-    assert not any("exhausted" in line for line in err)
+    assert sleeps == [2.0]
+    assert any(line.startswith("ws_down:") for line in err)
     blob = " ".join(err)
+    assert "falling back to polling" not in blob
+    assert "exhausted" not in blob
+    assert "staying on polling" not in blob
     assert "wss://" not in blob
     assert "example.invalid" not in blob
+
+
+def test_ws_backoff_caps_at_30s():
+    from filter_floor.listeners.solana_ws import ws_backoff_s
+
+    assert ws_backoff_s(0) == 2.0
+    assert ws_backoff_s(1) == 5.0
+    assert ws_backoff_s(2) == 15.0
+    assert ws_backoff_s(3) == 30.0
+    assert ws_backoff_s(99) == 30.0

@@ -19,7 +19,7 @@ BONDING_CURVE_SEED = b"bonding-curve"
 CREATE_DISCRIMINATOR = hashlib.sha256(b"global:create").digest()[:8]
 CREATE_V2_DISCRIMINATOR = hashlib.sha256(b"global:create_v2").digest()[:8]
 KNOWN_CREATE_DISCS = {CREATE_DISCRIMINATOR, CREATE_V2_DISCRIMINATOR}
-CREATE_LOG_MARKERS = ("Instruction: Create", "Instruction: CreateV2")
+CREATE_LOG_NAMES = frozenset({"Create", "CreateV2"})
 
 BIRTH_CONCENTRATION_NOTE = (
     "not graduated + creator can still dump curve inventory: caution detail, "
@@ -129,7 +129,7 @@ class PumpCreate:
 
 
 def logs_contain_create(logs: object) -> bool:
-    """True when Pump create / create_v2 appears in program logs."""
+    """True only for exact Instruction: Create or Instruction: CreateV2."""
     if isinstance(logs, str):
         rows = [logs]
     elif isinstance(logs, list):
@@ -139,9 +139,20 @@ def logs_contain_create(logs: object) -> bool:
     for line in rows:
         if not isinstance(line, str):
             continue
-        if any(marker in line for marker in CREATE_LOG_MARKERS):
+        if _log_instruction_name(line) in CREATE_LOG_NAMES:
             return True
     return False
+
+
+def _log_instruction_name(line: str) -> str | None:
+    key = "Instruction: "
+    idx = line.find(key)
+    if idx < 0:
+        return None
+    rest = line[idx + len(key) :].strip()
+    if not rest:
+        return None
+    return rest.split()[0]
 
 
 def extract_pump_creates(tx: dict, *, signature: str | None = None) -> list[PumpCreate]:
@@ -184,6 +195,19 @@ def pump_ix_summaries(tx: dict) -> list[tuple[str, int]]:
         if isinstance(data, (bytes, bytearray)) and data:
             disc = bytes(data[:8]).hex()
         out.append((disc, len(ix.get("accounts") or [])))
+    return out
+
+
+def create_ix_summaries(tx: dict) -> list[tuple[str, int]]:
+    """disc_hex/account_count only for known create / create_v2 Pump ixs."""
+    out: list[tuple[str, int]] = []
+    for disc, count in pump_ix_summaries(tx):
+        try:
+            raw = bytes.fromhex(disc)
+        except ValueError:
+            continue
+        if raw[:8] in KNOWN_CREATE_DISCS:
+            out.append((disc, count))
     return out
 
 

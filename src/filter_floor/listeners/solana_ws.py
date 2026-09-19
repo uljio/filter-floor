@@ -20,14 +20,14 @@ from filter_floor.scanners.pumpfun import (
     PumpCreate,
     extract_pump_create_stats,
     logs_contain_create,
-    pump_ix_summaries,
+    create_ix_summaries,
 )
 
 DEFAULT_POLL_SECONDS = 5.0
 DEFAULT_SIG_LIMIT = 20
-MAX_WS_RECONNECTS = 10
-WS_PING_INTERVAL_S = 20
-WS_PING_TIMEOUT_S = 20
+WS_PING_INTERVAL_S = 15
+WS_PING_TIMEOUT_S = 30
+WS_BACKOFF_S = (2.0, 5.0, 15.0, 30.0)
 
 ScanFn = Callable[[Chain, str], ScanResult]
 ErrFn = Callable[[str], None]
@@ -188,7 +188,7 @@ def fetch_creates_for_logs(
     )
     undecoded: tuple[tuple[str, int], ...] = ()
     if not found:
-        undecoded = tuple(pump_ix_summaries(tx))
+        undecoded = tuple(create_ix_summaries(tx))
     return PollPass(
         creates=found,
         signatures=1,
@@ -211,9 +211,8 @@ def handle_create_poll(
     """Print stats; scan every decoded=1 create; dump disc_hex on decoded=0."""
     err_fn(poll.summary_line())
     if poll.log_create and poll.decoded == 0:
-        rows = poll.undecoded_ixs or (("-", 0),)
-        for disc_hex, account_count in rows:
-            err_fn(f"disc_hex={disc_hex or '-'} account_count={account_count}")
+        for disc_hex, account_count in poll.undecoded_ixs:
+            err_fn(f"disc_hex={disc_hex} account_count={account_count}")
     results: list[ScanResult] = []
     if poll.decoded < 1:
         return results
@@ -414,6 +413,14 @@ def run_ws_watch(
     asyncio.run(_run())
 
 
+def ws_backoff_s(fail_index: int) -> float:
+    if fail_index < 0:
+        return WS_BACKOFF_S[0]
+    if fail_index >= len(WS_BACKOFF_S):
+        return WS_BACKOFF_S[-1]
+    return WS_BACKOFF_S[fail_index]
+
+
 def start_watch(
     *,
     min_score_alert: int = 50,
@@ -423,33 +430,27 @@ def start_watch(
     print_fn=None,
     err_fn: ErrFn | None = None,
     limit: int = DEFAULT_SIG_LIMIT,
+    sleep_fn=time.sleep,
 ) -> list[ScanResult] | None:
     """Prefer logsSubscribe when SOLANA_WSS_URL is set.
 
-    On WS drop: print one poll line, then reconnect (ping 20s / timeout 20s).
-    Max 10 reconnects, then stay on polling. Messages never include URL/key.
+    On WS drop: print ws_down and reconnect forever (ping 15s / timeout 30s).
+    Backoff 2s, 5s, 15s, 30s (cap 30s). Polling is not the create detector.
+    Messages never include URL/key.
     """
     write_out = print_fn or _print_out
     write_err = err_fn or _print_err
-    wss = os.environ.get("SOLANA_WSS_URL", "").strip()
     seen_mints: set[str] = set()
-    seen_signatures: set[str] = set()
-    watch_kwargs = dict(
-        min_score_alert=min_score_alert,
-        rpc=rpc,
-        scan_fn=scan_fn,
-        print_fn=write_out,
-        err_fn=write_err,
-        seen_mints=seen_mints,
-        seen_signatures=seen_signatures,
-        limit=limit,
-    )
-    if not wss:
-        write_err("solana WS watch skipped: SOLANA_WSS_URL unset; falling back to polling")
-        return run_watch(once=once, **watch_kwargs)
-
-    reconnects = 0
+    fail = 0
     while True:
+        wss = os.environ.get("SOLANA_WSS_URL", "").strip()
+        if not wss:
+            write_err("ws_down: SOLANA_WSS_URL unset")
+            if once:
+                return None
+            sleep_fn(ws_backoff_s(fail))
+            fail += 1
+            continue
         try:
             run_ws_watch(
                 wss_url=wss,
@@ -464,12 +465,9 @@ def start_watch(
             return None
         except Exception as exc:
             reason = sanitize_rpc_text(f"{type(exc).__name__}: {exc}")
-            write_err(f"solana WS watch failed; falling back to polling: {reason}")
-            run_watch(once=True, **watch_kwargs)
+            write_err(f"ws_down: {reason}")
             if once:
                 return None
-            reconnects += 1
-            if reconnects > MAX_WS_RECONNECTS:
-                write_err("solana WS reconnects exhausted; staying on polling")
-                return run_watch(once=False, **watch_kwargs)
-            write_err(f"solana WS reconnect {reconnects}/{MAX_WS_RECONNECTS}")
+            sleep_fn(ws_backoff_s(fail))
+            fail += 1
+            _ = rpc, scan_fn, limit

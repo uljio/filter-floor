@@ -223,3 +223,39 @@ def test_pump_ix_summaries_disc_hex_and_account_count():
         ],
     }
     assert pump_ix_summaries(tx) == [("aabbccdd11223344", 2)]
+
+
+def test_logs_contain_create_is_exact_instruction_name():
+    from filter_floor.scanners.pumpfun import logs_contain_create
+
+    assert logs_contain_create(["Program log: Instruction: Create"]) is True
+    assert logs_contain_create(["Program log: Instruction: CreateV2"]) is True
+    assert logs_contain_create(["Program log: Instruction: CreateIdempotent"]) is False
+    assert logs_contain_create(["Program log: Instruction: Buy"]) is False
+
+
+def test_create_ix_summaries_ignores_event_and_sell_discs():
+    from filter_floor.scanners.pumpfun import CREATE_DISCRIMINATOR, create_ix_summaries
+
+    mint = pubkey_from_byte(63)
+    tx = {
+        "logs": ["Program log: Instruction: Create"],
+        "instructions": [
+            {
+                "program_id": PUMP_PROGRAM_ID,
+                "accounts": [],
+                "data_hex": CREATE_DISCRIMINATOR.hex(),
+            },
+            {
+                "program_id": PUMP_PROGRAM_ID,
+                "accounts": [mint],
+                "data_hex": "e445a52e51cb9a1d",
+            },
+            {
+                "program_id": PUMP_PROGRAM_ID,
+                "accounts": [mint] * 8,
+                "data_hex": "a572670079cef751",
+            },
+        ],
+    }
+    assert create_ix_summaries(tx) == [(CREATE_DISCRIMINATOR.hex(), 0)]
